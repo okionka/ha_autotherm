@@ -26,9 +26,8 @@ CONF_VENTILATION_POWER        = "ventilation_power"
 CONF_STATUS_CODE              = "status_code"
 
 CONFIG_SCHEMA = (
-    climate.CLIMATE_SCHEMA.extend(
+    climate.climate_schema(Autotherm2DClimate).extend(
         {
-            cv.GenerateID(): cv.declare_id(Autotherm2DClimate),
             cv.Optional(CONF_TEMPERATURE_SENSOR): cv.use_id(sensor.Sensor),
             cv.Optional(CONF_HEATER_BOARD_TEMPERATURE): sensor.sensor_schema(
                 unit_of_measurement="°C",
