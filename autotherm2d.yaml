@@ -6,10 +6,9 @@ substitutions:
 
 # ── External component ───────────────────────────────────────────────────────
 external_components:
-  - source:
-      type: local
-      path: /config/esphome/components
+  - source: github://okionka/ha_autotherm@main
     components: [autotherm2d]
+    refresh: 1d
 
 esphome:
   name: ${name}
