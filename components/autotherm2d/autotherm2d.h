@@ -82,7 +82,7 @@ class Autotherm2DClimate : public climate::Climate,
   // ── Climate traits ──────────────────────────────────────────────────────────
   climate::ClimateTraits traits() override {
     auto t = climate::ClimateTraits();
-    t.set_supports_current_temperature(true);
+    t.add_feature_flags(climate::ClimateEntityFeature::CURRENT_TEMPERATURE);
     t.set_supported_modes({
         climate::CLIMATE_MODE_OFF,
         climate::CLIMATE_MODE_HEAT,
@@ -96,7 +96,6 @@ class Autotherm2DClimate : public climate::Climate,
     t.set_visual_min_temperature(0.0f);
     t.set_visual_max_temperature(30.0f);
     t.set_visual_temperature_step(1.0f);
-    t.set_supports_two_point_target_temperature(false);
     return t;
   }
 
@@ -128,11 +127,11 @@ class Autotherm2DClimate : public climate::Climate,
       needs_send = true;
     }
 
-    // ESPHome 2026.x: get_custom_preset() returns StringRef (implicit const char*)
-    const char *preset_cstr = call.get_custom_preset();
-    if (preset_cstr != nullptr && *preset_cstr != '\0') {
-      power_mode_ = preset_to_power_mode(preset_cstr);
-      this->set_custom_preset_(preset_cstr);
+    // ESPHome 2026.x: get_custom_preset() returns StringRef – use .c_str()
+    auto preset_ref = call.get_custom_preset();
+    if (!preset_ref.empty()) {
+      power_mode_ = preset_to_power_mode(preset_ref.c_str());
+      this->set_custom_preset_(preset_ref.c_str());
       needs_send = true;
     }
 
