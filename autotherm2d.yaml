@@ -5,19 +5,11 @@ substitutions:
   gateway_ip:     "192.168.7.1"
 
 # ── External component ───────────────────────────────────────────────────────
-# Option A (recommended for HA Add-on): copy component files locally to
-#   /config/esphome/components/autotherm2d/   and use:
 external_components:
   - source:
       type: local
-      path: components
+      path: /config/esphome/components
     components: [autotherm2d]
-
-# Option B (if HA container has GitHub access):
-# external_components:
-#   - source: github://okionka/ha_autotherm@main
-#     components: [autotherm2d]
-#     refresh: always
 
 esphome:
   name: ${name}
