@@ -25,8 +25,11 @@ esp32:
 # ── Logging ───────────────────────────────────────────────────────────────────
 logger:
   baud_rate: 0
-  # Set to DEBUG to see UART traffic; use WARN in production
-  level: INFO
+  level: INFO            # Global level – keep INFO to avoid noise
+  logs:
+    controller: DEBUG    # UART from panel → heater
+    heater: DEBUG        # UART from heater → panel
+    autotherm2d: DEBUG   # Component internals (TX frames, parser warnings)
 
 # ── Home Assistant API ────────────────────────────────────────────────────────
 api:
@@ -79,7 +82,7 @@ uart:
             id: uart_2_heater
             data: !lambda return bytes;
         - lambda: |-
-            ESP_LOGV("controller", "→ heater:");
+            ESP_LOGD("controller", "→ heater:");
             UARTDebug::log_hex(direction, bytes, ':');
 
   # UART 2 – heater bus (read & written by climate component)
@@ -97,7 +100,7 @@ uart:
             id: uart_1_controller
             data: !lambda return bytes;
         - lambda: |-
-            ESP_LOGV("heater", "→ controller:");
+            ESP_LOGD("heater", "→ controller:");
             UARTDebug::log_hex(direction, bytes, ':');
 
 # ── Room temperature sensor ────────────────────────────────────────────────────
