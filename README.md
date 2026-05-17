@@ -53,18 +53,26 @@ responses and accepting override commands from Home Assistant.
 
 ## Quick start
 
-### 1. Clone the repository
+### 1. Add to your ESPHome config
 
-```bash
-git clone https://github.com/okionka/ha_autotherm.git
-cd ha_autotherm
+Add this to your `autotherm2d.yaml` (or copy the full config from this repo):
+
+```yaml
+external_components:
+  - source: github://okionka/ha_autotherm@main
+    components: [autotherm2d]
 ```
+
+ESPHome will fetch the component automatically on every compile — no local files needed.
 
 ### 2. Create your secrets file
 
+In your ESPHome config folder create `secrets.yaml` from the template:
+
 ```bash
-cp secrets.yaml.example secrets.yaml
-# Edit secrets.yaml with your WiFi credentials, OTA password, and API key
+# Download template
+curl -o secrets.yaml https://raw.githubusercontent.com/okionka/ha_autotherm/main/secrets.yaml.example
+# Then edit secrets.yaml with your real credentials
 ```
 
 ### 3. Set your room temperature sensor
@@ -84,11 +92,18 @@ You can use **any** ESPHome-compatible sensor as the room thermometer:
 - A local sensor on the ESP32 (e.g. `platform: dht`, `platform: dallas`)
 - Any sensor with a numeric temperature state
 
-### 4. Flash
+### 4. Download config & flash
 
 ```bash
+# Download the ready-made config
+curl -o autotherm2d.yaml https://raw.githubusercontent.com/okionka/ha_autotherm/main/autotherm2d.yaml
+
+# Compile & flash (ESPHome fetches the component from GitHub automatically)
 esphome run autotherm2d.yaml
 ```
+
+Or paste the YAML directly into the **ESPHome Dashboard** in Home Assistant –
+no local files needed beyond `autotherm2d.yaml` and `secrets.yaml`.
 
 ---
 

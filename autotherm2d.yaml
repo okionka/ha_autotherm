@@ -4,12 +4,9 @@ substitutions:
   device_ip:      "192.168.7.6"
   gateway_ip:     "192.168.7.1"
 
-# ── External component (local path) ──────────────────────────────────────────
+# ── External component ───────────────────────────────────────────────────────
 external_components:
-  - source:
-      type: git
-      url: https://github.com/okionka/ha_autotherm
-      ref: main
+  - source: github://okionka/ha_autotherm@main
     components: [autotherm2d]
 
 esphome:
