@@ -8,6 +8,7 @@ substitutions:
 external_components:
   - source: github://okionka/ha_autotherm@main
     components: [autotherm2d]
+    refresh: always
 
 esphome:
   name: ${name}
