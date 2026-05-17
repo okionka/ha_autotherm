@@ -1,0 +1,168 @@
+substitutions:
+  name: "autotherm2d"
+  friendly_name: "Autotherm 2D"
+  device_ip:      "192.168.7.6"
+  gateway_ip:     "192.168.7.1"
+
+# ── External component (local path) ──────────────────────────────────────────
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [autotherm2d]
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2024.6.0
+  name_add_mac_suffix: false
+
+# ── Platform ──────────────────────────────────────────────────────────────────
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logger:
+  baud_rate: 0
+  # Set to DEBUG to see UART traffic; use WARN in production
+  level: INFO
+
+# ── Home Assistant API ────────────────────────────────────────────────────────
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+# ── OTA ───────────────────────────────────────────────────────────────────────
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# ── WiFi ──────────────────────────────────────────────────────────────────────
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  manual_ip:
+    static_ip: ${device_ip}
+    gateway: ${gateway_ip}
+    subnet: 255.255.255.0
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret ap_password
+
+captive_portal:
+
+web_server:
+  port: 80
+  version: 3
+  local: true
+
+# ── Restart button ────────────────────────────────────────────────────────────
+button:
+  - platform: restart
+    name: "Restart"
+
+# ── UART ──────────────────────────────────────────────────────────────────────
+uart:
+  # UART 1 – physical controller panel (transparent pass-through only)
+  - id: uart_1_controller
+    baud_rate: 9600
+    tx_pin: GPIO1
+    rx_pin: GPIO3
+    debug:
+      direction: RX
+      dummy_receiver: true
+      after:
+        delimiter: "\r\n"
+      sequence:
+        - uart.write:
+            id: uart_2_heater
+            data: !lambda return bytes;
+        - lambda: |-
+            ESP_LOGV("controller", "→ heater:");
+            UARTDebug::log_hex(direction, bytes, ':');
+
+  # UART 2 – heater bus (read & written by climate component)
+  - id: uart_2_heater
+    baud_rate: 9600
+    tx_pin: GPIO17
+    rx_pin: GPIO16
+    debug:
+      direction: RX
+      dummy_receiver: true
+      after:
+        delimiter: "\r\n"
+      sequence:
+        - uart.write:
+            id: uart_1_controller
+            data: !lambda return bytes;
+        - lambda: |-
+            ESP_LOGV("heater", "→ controller:");
+            UARTDebug::log_hex(direction, bytes, ':');
+
+# ── Room temperature sensor ────────────────────────────────────────────────────
+# Pull any sensor entity from Home Assistant.
+# Replace "sensor.living_room_temperature" with your actual entity_id.
+# You can also use a local ESPHome sensor (e.g. DHT22, DS18B20) – just
+# give it an id and reference that id under climate → temperature_sensor.
+sensor:
+  - platform: homeassistant
+    id: room_temperature
+    entity_id: sensor.living_room_temperature   # ← change to your HA sensor
+    unit_of_measurement: "°C"
+    filters:
+      - filter_out: nan
+
+  # ── Diagnostic / system sensors ──────────────────────────────────────────
+  - platform: wifi_signal
+    name: "WiFi Signal dB"
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: diagnostic
+
+  - platform: copy
+    source_id: wifi_signal_db
+    name: "WiFi Signal %"
+    filters:
+      - lambda: return min(max(2.0f * (x + 100.0f), 0.0f), 100.0f);
+    unit_of_measurement: "%"
+    entity_category: diagnostic
+    device_class: ""
+
+  - platform: uptime
+    type: seconds
+    name: "Uptime"
+    entity_category: diagnostic
+
+# ── Climate entity ────────────────────────────────────────────────────────────
+climate:
+  - platform: autotherm2d
+    name: "Diesel Heater"
+    uart_id: uart_2_heater
+
+    # Room thermometer used for current_temperature display in HA
+    temperature_sensor: room_temperature
+
+    # Optional diagnostic sensors (remove any you don't want)
+    heater_board_temperature:
+      name: "Heater Board Temperature"
+
+    battery_voltage:
+      name: "Heater Battery Voltage"
+
+    air_temperature:
+      name: "Heater Air Temperature"
+
+    panel_temperature:
+      name: "Panel Temperature"
+
+    power_level:
+      name: "Heater Power Level"
+
+    ventilation_power:
+      name: "Ventilator Power"
+
+    status_code:
+      name: "Heater Status Code"
+      entity_category: diagnostic
