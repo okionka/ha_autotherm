@@ -144,32 +144,57 @@ sensor:
 # ── Climate entity ────────────────────────────────────────────────────────────
 climate:
   - platform: autotherm2d
-    id: diesel_heater          # needed to call process_incoming_byte() from lambda
+    id: diesel_heater          # referenced from UART debug lambda
     name: "Diesel Heater"
     uart_id: uart_2_heater
 
-    # Room thermometer used for current_temperature display in HA
+    # ── Room thermometer (current_temperature display in HA) ────────────────
     temperature_sensor: room_temperature
 
-    # Optional diagnostic sensors (remove any you don't want)
+    # ── By T Air: HA sensor → sent as 0x11 to heater when active ───────────
+    # The component smooths large temperature jumps (max 2 °C per update).
+    # Leave out (or set to same as temperature_sensor) if not needed.
+    air_temperature_source: room_temperature   # ← change to your preferred sensor
+
+    # ── Status / control sensors ────────────────────────────────────────────
+    status_text:
+      name: "Heater Status"
+
+    power_level:
+      name: "Heater Power Level"
+
+    # ── Diagnostic sensors ──────────────────────────────────────────────────
+    status_code:
+      name: "Heater Status Code"
+      entity_category: diagnostic
+
+    error_code:
+      name: "Heater Error Code"
+      entity_category: diagnostic
+
+    error_text:
+      name: "Heater Error"
+      entity_category: diagnostic
+
+    software_version:
+      name: "Heater Firmware Version"
+      entity_category: diagnostic
+
     heater_board_temperature:
       name: "Heater Board Temperature"
+      entity_category: diagnostic
 
     battery_voltage:
       name: "Heater Battery Voltage"
+      entity_category: diagnostic
 
     air_temperature:
       name: "Heater Air Temperature"
 
     panel_temperature:
       name: "Panel Temperature"
-
-    power_level:
-      name: "Heater Power Level"
+      entity_category: diagnostic
 
     ventilation_power:
       name: "Ventilator Power"
-
-    status_code:
-      name: "Heater Status Code"
       entity_category: diagnostic
