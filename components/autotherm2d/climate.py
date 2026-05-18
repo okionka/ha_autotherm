@@ -33,6 +33,7 @@ CONF_ERROR_CODE               = "error_code"
 CONF_STATUS_TEXT              = "status_text"
 CONF_ERROR_TEXT               = "error_text"
 CONF_SOFTWARE_VERSION         = "software_version"
+CONF_STATUS_REPORT            = "status_report"
 
 # ── Config schema ─────────────────────────────────────────────────────────────
 CONFIG_SCHEMA = (
