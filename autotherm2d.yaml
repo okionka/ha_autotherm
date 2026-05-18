@@ -92,7 +92,7 @@ uart:
     rx_pin: GPIO16
     debug:
       direction: RX
-      dummy_receiver: false   # Autotherm2DClimate is the real receiver
+      dummy_receiver: true     # uart_debug consumes bytes; we feed them to the component via lambda
       after:
         delimiter: "\r\n"
       sequence:
@@ -102,6 +102,10 @@ uart:
         - lambda: |-
             ESP_LOGD("heater", "→ controller:");
             UARTDebug::log_hex(direction, bytes, ':');
+            // Feed bytes into the autotherm2d parser
+            for (uint8_t b : bytes) {
+              id(diesel_heater)->process_incoming_byte(b);
+            }
 
 # ── Room temperature sensor ────────────────────────────────────────────────────
 # Pull any sensor entity from Home Assistant.
@@ -140,6 +144,7 @@ sensor:
 # ── Climate entity ────────────────────────────────────────────────────────────
 climate:
   - platform: autotherm2d
+    id: diesel_heater          # needed to call process_incoming_byte() from lambda
     name: "Diesel Heater"
     uart_id: uart_2_heater
 

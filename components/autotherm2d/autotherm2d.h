@@ -68,16 +68,14 @@ class Autotherm2DClimate : public climate::Climate,
   }
 
   void loop() override {
+    // Bytes are fed via process_incoming_byte() from the UART debug lambda.
+    // uart_debug consumes bytes from the hardware buffer before available()
+    // returns them to the component, so we don't call available()/read_byte() here.
+    // We only handle the parser timeout.
     const uint32_t now = millis();
     if (read_state_ != 0 && (now - parse_start_ms_) > PARSER_TIMEOUT_MS) {
       ESP_LOGW("autotherm2d", "Parser timeout (state=%d) – reset", read_state_);
       reset_parser();
-    }
-    int budget = MAX_BYTES_PER_LOOP;
-    while (available() && budget-- > 0) {
-      uint8_t byte;
-      read_byte(&byte);
-      process_byte(byte);
     }
   }
 
@@ -271,6 +269,9 @@ class Autotherm2DClimate : public climate::Climate,
   }
 
   // ── State machine ─────────────────────────────────────────────────────────
+  // Called from YAML debug lambda (bytes consumed by uart_debug before loop())
+  void process_incoming_byte(uint8_t byte) { process_byte(byte); }
+
   void process_byte(uint8_t byte) {
     switch (read_state_) {
       case 0:
