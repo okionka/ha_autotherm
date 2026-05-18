@@ -1,6 +1,6 @@
 # ha_autoterm – ESPHome Diesel Heater Climate Component
 
-An ESPHome **external component** that integrates Autotherm Air 2D / Planar 2D
+An ESPHome **external component** that integrates Autoterm Air 2D / Planar 2D
 diesel heaters with Home Assistant as a full **Climate** entity.
 
 ---

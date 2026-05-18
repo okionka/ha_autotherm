@@ -1,6 +1,6 @@
 substitutions:
   name: "autoterm2d"
-  friendly_name: "Autotherm 2D"
+  friendly_name: "Autoterm 2D"
   device_ip:  "192.168.7.6"
   gateway_ip: "192.168.7.1"
 

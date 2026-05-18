@@ -1,4 +1,4 @@
-"""climate.py – Autotherm2D climate platform for ESPHome.
+"""climate.py – Autoterm2D climate platform for ESPHome.
 
 Creates two components:
   • ControllerPanelComponent  – transparent UART1 bridge (panel → heater)
