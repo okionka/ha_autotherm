@@ -52,7 +52,7 @@ CONFIG_SCHEMA = (
             # UART1 (controller panel bus) – OPTIONAL
             # Omit panel_uart_id to run in virtual-panel mode (ESP32 drives poll cycle)
             cv.Optional(CONF_PANEL_UART_ID): cv.use_id(uart.UARTComponent),
-            cv.Optional(CONF_PANEL_COMPONENT_ID): cv.declare_id(ControllerPanelComponent),
+            cv.GenerateID(CONF_PANEL_COMPONENT_ID): cv.declare_id(ControllerPanelComponent),
 
             # Input sensors
             cv.Optional(CONF_TEMPERATURE_SENSOR): cv.use_id(sensor.Sensor),
