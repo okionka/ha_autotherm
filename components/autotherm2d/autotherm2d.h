@@ -52,6 +52,9 @@ class Autotherm2DClimate : public climate::Climate,
   void set_ventilation_power_sensor(sensor::Sensor *s)        { s_fan_actual_      = s; }
   void set_status_sensor(sensor::Sensor *s)                   { s_status_code_     = s; }
 
+  // Called from UART debug lambda – uart_debug consumes bytes before loop()
+  void process_incoming_byte(uint8_t byte) { process_byte(byte); }
+
   // ── ESPHome Component ───────────────────────────────────────────────────────
   float get_setup_priority() const override { return setup_priority::DATA; }
 
@@ -269,9 +272,6 @@ class Autotherm2DClimate : public climate::Climate,
   }
 
   // ── State machine ─────────────────────────────────────────────────────────
-  // Called from YAML debug lambda (bytes consumed by uart_debug before loop())
-  void process_incoming_byte(uint8_t byte) { process_byte(byte); }
-
   void process_byte(uint8_t byte) {
     switch (read_state_) {
       case 0:
