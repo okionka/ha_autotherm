@@ -92,7 +92,7 @@ uart:
     rx_pin: GPIO16
     debug:
       direction: RX
-      dummy_receiver: true
+      dummy_receiver: false   # Autotherm2DClimate is the real receiver
       after:
         delimiter: "\r\n"
       sequence:
