@@ -43,6 +43,7 @@ CONF_STATUS_TEXT              = "status_text"
 CONF_ERROR_TEXT               = "error_text"
 CONF_SOFTWARE_VERSION         = "software_version"
 CONF_STATUS_REPORT            = "status_report"
+CONF_REMAINING_WORK_TIME      = "remaining_work_time"
 
 # ── Config schema ─────────────────────────────────────────────────────────────
 CONFIG_SCHEMA = (
@@ -112,6 +113,13 @@ CONFIG_SCHEMA = (
                 icon="mdi:clipboard-text",
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
+            cv.Optional(CONF_REMAINING_WORK_TIME): sensor.sensor_schema(
+                unit_of_measurement="min",
+                icon="mdi:timer-outline",
+                accuracy_decimals=0,
+                state_class=STATE_CLASS_MEASUREMENT,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)   # uart_id = UART2 (heater)
@@ -160,6 +168,7 @@ async def to_code(config):
         (CONF_VENTILATION_POWER,        "set_ventilation_power_sensor"),
         (CONF_STATUS_CODE,              "set_status_sensor"),
         (CONF_ERROR_CODE,               "set_error_code_sensor"),
+        (CONF_REMAINING_WORK_TIME,      "set_remaining_time_sensor"),
     ]:
         if conf_key in config:
             sens = await sensor.new_sensor(config[conf_key])

@@ -82,6 +82,16 @@ class Autoterm2DClimate : public climate::Climate,
   void set_error_text_sensor(text_sensor::TextSensor *s)      { s_error_text_     = s; }
   void set_software_version_sensor(text_sensor::TextSensor *s){ s_sw_version_     = s; }
   void set_status_report_sensor(text_sensor::TextSensor *s)   { s_status_report_  = s; }
+  void set_remaining_time_sensor(sensor::Sensor *s)           { s_remaining_time_ = s; }
+
+  // ── Timer control (called from YAML number set_action) ───────────────────
+  // minutes == 0 → unlimited (sends flag 0xFF)
+  // minutes  > 0 → timed run (sends flag 0x00 + minutes)
+  void set_work_time(uint8_t minutes) {
+    work_time_minutes_ = minutes;
+    ESP_LOGD("autoterm2d", "Timer set: %s",
+             minutes == 0 ? "unlimited" : (std::to_string(minutes) + " min").c_str());
+  }
 
   // ── Diagnostic button: format last-known status into HA text sensor ────────
   void publish_status_report() {
@@ -227,6 +237,7 @@ class Autoterm2DClimate : public climate::Climate,
   text_sensor::TextSensor *s_error_text_{nullptr};
   text_sensor::TextSensor *s_sw_version_{nullptr};
   text_sensor::TextSensor *s_status_report_{nullptr};
+  sensor::Sensor         *s_remaining_time_{nullptr};
 
   // ── Control state ──────────────────────────────────────────────────────────
   uint8_t temp_set_    {15};
@@ -236,6 +247,7 @@ class Autoterm2DClimate : public climate::Climate,
   uint8_t major_state_ {0};
   float   last_sent_air_temp_{NAN};
   bool    version_requested_{false};
+  uint8_t work_time_minutes_{0};   // 0 = unlimited (sends 0xFF)
 
   // ── Virtual panel state ────────────────────────────────────────────────────
   uint32_t last_vpanel_poll_ms_{0};
@@ -403,17 +415,23 @@ class Autoterm2DClimate : public climate::Climate,
 
   // Start / update command (0x01 / 0x02 with payload)
   void send_frame(uint8_t cmd) {
+    // work_time_minutes_ == 0 → unlimited: flag=0xFF, time=0xFF
+    // work_time_minutes_  > 0 → timed:    flag=0x00, time=minutes
+    uint8_t wt_flag = (work_time_minutes_ == 0) ? 0xFF : 0x00;
+    uint8_t wt_min  = (work_time_minutes_ == 0) ? 0xFF : work_time_minutes_;
     std::vector<uint8_t> frame = {
-        0xAA, 0x03, 0x06, 0x00, cmd, 0xFF, 0xFF,
+        0xAA, 0x03, 0x06, 0x00, cmd, wt_flag, wt_min,
         power_mode_, temp_set_, vent_cmd_, power_level_};
     uint16_t crc = crc16_modbus(frame);
     frame.push_back((crc >> 8) & 0xFF);
     frame.push_back(crc & 0xFF);
     write_array(frame.data(), frame.size());
-    ESP_LOGD("autoterm2d", "TX %-8s mode=%s temp=%d°C vent=%s level=%d",
+    ESP_LOGD("autoterm2d", "TX %-8s mode=%s temp=%d°C vent=%s level=%d timer=%s",
              cmd == CMD_START ? "START" : "UPDATE",
              mode_description(power_mode_), temp_set_,
-             vent_cmd_ == 1 ? "On" : "Off", power_level_ + 1);
+             vent_cmd_ == 1 ? "On" : "Off", power_level_ + 1,
+             work_time_minutes_ == 0 ? "unlimited"
+                                     : (std::to_string(work_time_minutes_) + "min").c_str());
   }
   void send_control_command() { send_frame(CMD_START); }
 
@@ -560,6 +578,11 @@ class Autoterm2DClimate : public climate::Climate,
       "SETTINGS    mode=%-12s target=%d°C vent=%-3s level=%d/10 time=%s",
       mode_description(mode), target, vent == 1 ? "On" : "Off", level + 1,
       use_time ? (std::to_string(work_min) + "min").c_str() : "unlimited");
+
+    // Publish remaining work time (counts down while heater runs)
+    if (s_remaining_time_) {
+      s_remaining_time_->publish_state(use_time ? static_cast<float>(work_min) : 0.0f);
+    }
 
     publish_if(s_power_level_, static_cast<float>(level + 1));
     bool changed = false;

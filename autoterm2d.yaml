@@ -85,6 +85,23 @@ button:
     on_press:
       lambda: id(diesel_heater)->publish_status_report();
 
+# ── Timer (work-time) ───────────────────────────────────────────────────────────
+# 0 = unlimited  |  1-255 = run for N minutes then shut down automatically
+number:
+  - platform: template
+    name: "Heater Timer"
+    id: heater_timer
+    icon: mdi:timer
+    unit_of_measurement: "min"
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 0
+    optimistic: true
+    mode: box
+    set_action:
+      lambda: id(diesel_heater)->set_work_time((uint8_t)x);
+
 # ── UART ──────────────────────────────────────────────────────────────────────
 # UART1: Physical controller panel side (GPIO1 TX → panel, GPIO3 RX ← panel)
 #   Handled by ControllerPanelComponent: forwards panel bytes to UART2 TX,
@@ -196,4 +213,8 @@ climate:
 
     ventilation_power:
       name: "Ventilator Power"
+      entity_category: diagnostic
+
+    remaining_work_time:
+      name: "Heater Remaining Time"
       entity_category: diagnostic
