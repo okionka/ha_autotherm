@@ -68,9 +68,34 @@ class Autotherm2DClimate : public climate::Climate,
   void set_status_text_sensor(text_sensor::TextSensor *s)     { s_status_text_     = s; }
   void set_error_text_sensor(text_sensor::TextSensor *s)      { s_error_text_      = s; }
   void set_software_version_sensor(text_sensor::TextSensor *s){ s_sw_version_      = s; }
+  void set_status_report_sensor(text_sensor::TextSensor *s)  { s_status_report_   = s; }
 
   // Called from UART debug lambda (bytes consumed by uart_debug before loop())
   void process_incoming_byte(uint8_t byte) { process_byte(byte); }
+
+  // Triggered by the HA diagnostic button – formats last known status
+  void publish_status_report() {
+    if (!s_status_report_) return;
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+      "State: %s | Err: %s\n"
+      "Mode: %s | Level: %d/10 | Vent: %s\n"
+      "T-intake: %d°C | T-out: %s | Flame: %.0f°C\n"
+      "Battery: %.1fV | Fan: %d/%d Hz (%d/%d RPM) | Pump: %.2f Hz",
+      state_description(snap_major_, snap_minor_),
+      error_description(snap_error_),
+      mode_description(snap_mode_), snap_level_ + 1,
+      snap_vent_ == 1 ? "On" : "Off",
+      snap_t1_,
+      snap_t2_ok_ ? (std::to_string(snap_t2_) + "°C").c_str() : "n/a",
+      snap_flame_c_,
+      snap_volts_,
+      snap_fan_sp_, snap_fan_act_,
+      snap_fan_sp_ * 60, snap_fan_act_ * 60,
+      snap_pump_hz_);
+    s_status_report_->publish_state(buf);
+    ESP_LOGI("autotherm2d", "Status report:\n%s", buf);
+  }
 
   // ── ESPHome Component ──────────────────────────────────────────────────────
   float get_setup_priority() const override { return setup_priority::DATA; }
@@ -160,6 +185,7 @@ class Autotherm2DClimate : public climate::Climate,
   text_sensor::TextSensor *s_status_text_{nullptr};
   text_sensor::TextSensor *s_error_text_{nullptr};
   text_sensor::TextSensor *s_sw_version_{nullptr};
+  text_sensor::TextSensor *s_status_report_{nullptr};
 
   // ── Control state ──────────────────────────────────────────────────────────
   uint8_t temp_set_    {15};
@@ -170,6 +196,18 @@ class Autotherm2DClimate : public climate::Climate,
 
   float   last_sent_air_temp_{NAN};
   bool    version_requested_{false};
+
+  // Snapshot of last 0x0F status – used by publish_status_report()
+  uint8_t snap_major_{0}, snap_minor_{0}, snap_error_{0};
+  int     snap_t1_{0};
+  bool    snap_t2_ok_{false};
+  int     snap_t2_{0};
+  float   snap_volts_{0};
+  float   snap_flame_c_{0};
+  uint8_t snap_fan_sp_{0}, snap_fan_act_{0};
+  float   snap_pump_hz_{0};
+  uint8_t snap_level_{0}, snap_mode_{0};
+  uint8_t snap_vent_{0};
 
   // ── Parser state ───────────────────────────────────────────────────────────
   uint8_t  read_state_{0};
@@ -406,6 +444,12 @@ class Autotherm2DClimate : public climate::Climate,
 
     major_state_ = major;
 
+    // Store snapshot for publish_status_report()
+    snap_major_ = major; snap_minor_ = minor; snap_error_ = error;
+    snap_t1_ = t1; snap_t2_ok_ = t2_ok; snap_t2_ = t2;
+    snap_volts_ = volts; snap_flame_c_ = flame_c;
+    snap_fan_sp_ = fan_sp; snap_fan_act_ = fan_act; snap_pump_hz_ = pump_hz;
+
     // Numeric status code (major * 256 + minor)
     publish_if(s_status_code_,   static_cast<float>((major << 8) | minor));
     // Textual status
@@ -448,6 +492,9 @@ class Autotherm2DClimate : public climate::Climate,
     uint8_t target        = safe_byte(3);
     uint8_t vent          = safe_byte(4);   // 0=Off, 1=On (heater encoding)
     uint8_t level         = safe_byte(5);
+
+    // Update snapshot for status report
+    snap_mode_ = mode; snap_level_ = level; snap_vent_ = vent;
 
     ESP_LOGD("autotherm2d",
       "SETTINGS    mode=%-12s target=%d°C vent=%-3s level=%d/10 time=%s",

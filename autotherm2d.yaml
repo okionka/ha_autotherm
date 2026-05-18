@@ -64,6 +64,14 @@ web_server:
 button:
   - platform: restart
     name: "Restart"
+    entity_category: config
+
+  - platform: template
+    name: "Status Report"
+    entity_category: diagnostic
+    icon: mdi:clipboard-text-search
+    on_press:
+      lambda: id(diesel_heater)->publish_status_report();
 
 # ── UART ──────────────────────────────────────────────────────────────────────
 uart:
@@ -178,6 +186,10 @@ climate:
 
     software_version:
       name: "Heater Firmware Version"
+      entity_category: diagnostic
+
+    status_report:
+      name: "Heater Status Report"
       entity_category: diagnostic
 
     heater_board_temperature:

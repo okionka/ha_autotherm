@@ -92,6 +92,10 @@ CONFIG_SCHEMA = (
                 icon="mdi:chip",
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
+            cv.Optional(CONF_STATUS_REPORT): text_sensor.text_sensor_schema(
+                icon="mdi:clipboard-text",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
@@ -134,6 +138,7 @@ async def to_code(config):
         (CONF_STATUS_TEXT,      "set_status_text_sensor"),
         (CONF_ERROR_TEXT,       "set_error_text_sensor"),
         (CONF_SOFTWARE_VERSION, "set_software_version_sensor"),
+        (CONF_STATUS_REPORT,    "set_status_report_sensor"),
     ]:
         if conf_key in config:
             ts = await text_sensor.new_text_sensor(config[conf_key])
