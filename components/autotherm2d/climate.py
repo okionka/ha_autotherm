@@ -1,4 +1,9 @@
-"""climate.py – Autotherm2D climate platform for ESPHome."""
+"""climate.py – Autotherm2D climate platform for ESPHome.
+
+Creates two components:
+  • ControllerPanelComponent  – transparent UART1 bridge (panel → heater)
+  • Autotherm2DClimate        – UART2 bridge + parser + climate entity
+"""
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import uart, climate, sensor, text_sensor
@@ -13,14 +18,19 @@ AUTO_LOAD = ["sensor", "text_sensor"]
 CODEOWNERS = ["@okionka"]
 
 autotherm2d_ns = cg.esphome_ns.namespace("autotherm2d")
+
 Autotherm2DClimate = autotherm2d_ns.class_(
     "Autotherm2DClimate", climate.Climate, cg.Component, uart.UARTDevice,
 )
+ControllerPanelComponent = autotherm2d_ns.class_(
+    "ControllerPanelComponent", cg.Component, uart.UARTDevice,
+)
 
 # ── Config keys ───────────────────────────────────────────────────────────────
+CONF_PANEL_UART_ID            = "panel_uart_id"
+CONF_PANEL_COMPONENT_ID       = "panel_component_id"
 CONF_TEMPERATURE_SENSOR       = "temperature_sensor"
 CONF_AIR_TEMP_SOURCE          = "air_temperature_source"
-
 CONF_HEATER_BOARD_TEMPERATURE = "heater_board_temperature"
 CONF_BATTERY_VOLTAGE          = "battery_voltage"
 CONF_AIR_TEMPERATURE          = "air_temperature"
@@ -29,7 +39,6 @@ CONF_POWER_LEVEL              = "power_level"
 CONF_VENTILATION_POWER        = "ventilation_power"
 CONF_STATUS_CODE              = "status_code"
 CONF_ERROR_CODE               = "error_code"
-
 CONF_STATUS_TEXT              = "status_text"
 CONF_ERROR_TEXT               = "error_text"
 CONF_SOFTWARE_VERSION         = "software_version"
@@ -39,11 +48,16 @@ CONF_STATUS_REPORT            = "status_report"
 CONFIG_SCHEMA = (
     climate.climate_schema(Autotherm2DClimate).extend(
         {
-            # Temperature sensors (input)
+            # UART2 (heater bus) – via uart_id from uart.UART_DEVICE_SCHEMA
+            # UART1 (controller panel bus)
+            cv.Required(CONF_PANEL_UART_ID): cv.use_id(uart.UARTComponent),
+            cv.GenerateID(CONF_PANEL_COMPONENT_ID): cv.declare_id(ControllerPanelComponent),
+
+            # Input sensors
             cv.Optional(CONF_TEMPERATURE_SENSOR): cv.use_id(sensor.Sensor),
             cv.Optional(CONF_AIR_TEMP_SOURCE): cv.use_id(sensor.Sensor),
 
-            # Diagnostic sensors (numeric)
+            # Numeric diagnostic sensors
             cv.Optional(CONF_HEATER_BOARD_TEMPERATURE): sensor.sensor_schema(
                 unit_of_measurement="°C", icon="mdi:thermometer",
                 accuracy_decimals=0, state_class=STATE_CLASS_MEASUREMENT,
@@ -99,18 +113,32 @@ CONFIG_SCHEMA = (
             ),
         }
     )
-    .extend(uart.UART_DEVICE_SCHEMA)
+    .extend(uart.UART_DEVICE_SCHEMA)   # uart_id = UART2 (heater)
     .extend(cv.COMPONENT_SCHEMA)
 )
 
 # ── Code generation ────────────────────────────────────────────────────────────
 async def to_code(config):
+    # ── Autotherm2DClimate (UART2 – heater side) ─────────────────────────────
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
-    await uart.register_uart_device(var, config)
+    await uart.register_uart_device(var, config)   # UART2
     await climate.register_climate(var, config)
 
-    # Input sensors
+    # ── ControllerPanelComponent (UART1 – panel side) ────────────────────────
+    panel = cg.new_Pvariable(config[CONF_PANEL_COMPONENT_ID])
+    await cg.register_component(panel, {})
+
+    panel_uart = await cg.get_variable(config[CONF_PANEL_UART_ID])
+    cg.add(panel.set_uart_parent(panel_uart))       # UART1 as panel UART
+
+    heater_uart = await cg.get_variable(config[uart.CONF_UART_ID])
+    cg.add(panel.set_heater_uart(heater_uart))      # panel → heater TX
+
+    # Wire UART1 back to climate for heater→controller forwarding
+    cg.add(var.set_controller_uart(panel_uart))
+
+    # ── Input sensors ─────────────────────────────────────────────────────────
     if CONF_TEMPERATURE_SENSOR in config:
         sens = await cg.get_variable(config[CONF_TEMPERATURE_SENSOR])
         cg.add(var.set_room_temperature_sensor(sens))
@@ -119,7 +147,7 @@ async def to_code(config):
         sens = await cg.get_variable(config[CONF_AIR_TEMP_SOURCE])
         cg.add(var.set_air_temp_source_sensor(sens))
 
-    # Numeric sensors
+    # ── Numeric sensors ───────────────────────────────────────────────────────
     for conf_key, setter in [
         (CONF_HEATER_BOARD_TEMPERATURE, "set_heater_board_temperature_sensor"),
         (CONF_BATTERY_VOLTAGE,          "set_battery_voltage_sensor"),
@@ -134,7 +162,7 @@ async def to_code(config):
             sens = await sensor.new_sensor(config[conf_key])
             cg.add(getattr(var, setter)(sens))
 
-    # Text sensors
+    # ── Text sensors ──────────────────────────────────────────────────────────
     for conf_key, setter in [
         (CONF_STATUS_TEXT,      "set_status_text_sensor"),
         (CONF_ERROR_TEXT,       "set_error_text_sensor"),

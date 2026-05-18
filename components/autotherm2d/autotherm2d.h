@@ -1,6 +1,11 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-//  Autotherm2D – ESPHome External Climate Component  (ESPHome 2026.x)
+//  Autotherm2DClimate
+//  Handles UART2 (physical heater side):
+//    • Reads bytes from heater (UART2 RX)
+//    • Forwards every byte unchanged to controller panel (UART1 TX)
+//    • Parses heater frames and updates Climate entity + sensors
+//    • Sends commands to heater (UART2 TX): start, stop, settings, 0x11
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <cmath>
@@ -25,10 +30,9 @@ static constexpr uint8_t  CMD_VERSION      = 0x06;
 static constexpr uint8_t  CMD_STATUS       = 0x0F;
 static constexpr uint8_t  CMD_PANEL_TEMP   = 0x11;
 
-static constexpr int      MAX_BYTES_PER_LOOP = 64;
 static constexpr int      MAX_PAYLOAD_LEN    = 64;
 static constexpr uint32_t PARSER_TIMEOUT_MS  = 500;
-static constexpr float    AIR_TEMP_MAX_JUMP  = 2.0f;   // °C per update
+static constexpr float    AIR_TEMP_MAX_JUMP  = 2.0f;
 
 
 class Autotherm2DClimate : public climate::Climate,
@@ -37,9 +41,10 @@ class Autotherm2DClimate : public climate::Climate,
  public:
   Autotherm2DClimate() = default;
 
-  // ── Sensor wiring (called from climate.py generated code) ──────────────────
+  // ── UART1 reference for forwarding heater→controller ──────────────────────
+  void set_controller_uart(uart::UARTComponent *u) { ctrl_uart_ = u; }
 
-  // Room temperature for current_temperature display
+  // ── Room temperature sensor (current_temperature display in HA) ────────────
   void set_room_temperature_sensor(sensor::Sensor *s) {
     s->add_on_state_callback([this](float v) {
       this->current_temperature = v;
@@ -47,33 +52,27 @@ class Autotherm2DClimate : public climate::Climate,
     });
   }
 
-  // HA sensor used as temperature source in "By T Air" mode
+  // ── By T Air: HA sensor → sent as 0x11 when active ────────────────────────
   void set_air_temp_source_sensor(sensor::Sensor *s) {
     s_air_temp_source_ = s;
-    s->add_on_state_callback([this](float temp) {
-      on_air_temp_source_update(temp);
-    });
+    s->add_on_state_callback([this](float t) { on_air_temp_update(t); });
   }
 
-  // Diagnostic / informational sensors
-  void set_heater_board_temperature_sensor(sensor::Sensor *s) { s_intake_temp_     = s; }
-  void set_battery_voltage_sensor(sensor::Sensor *s)          { s_battery_voltage_ = s; }
-  void set_air_temperature_sensor(sensor::Sensor *s)          { s_air_temp_        = s; }
-  void set_panel_temperature_sensor(sensor::Sensor *s)        { s_panel_temp_      = s; }
-  void set_power_level_sensor(sensor::Sensor *s)              { s_power_level_     = s; }
-  void set_ventilation_power_sensor(sensor::Sensor *s)        { s_fan_actual_      = s; }
-  void set_status_sensor(sensor::Sensor *s)                   { s_status_code_     = s; }
-  void set_error_code_sensor(sensor::Sensor *s)               { s_error_code_      = s; }
+  // ── Sensor setters ─────────────────────────────────────────────────────────
+  void set_heater_board_temperature_sensor(sensor::Sensor *s) { s_intake_temp_    = s; }
+  void set_battery_voltage_sensor(sensor::Sensor *s)          { s_battery_voltage_= s; }
+  void set_air_temperature_sensor(sensor::Sensor *s)          { s_air_temp_       = s; }
+  void set_panel_temperature_sensor(sensor::Sensor *s)        { s_panel_temp_     = s; }
+  void set_power_level_sensor(sensor::Sensor *s)              { s_power_level_    = s; }
+  void set_ventilation_power_sensor(sensor::Sensor *s)        { s_fan_actual_     = s; }
+  void set_status_sensor(sensor::Sensor *s)                   { s_status_code_    = s; }
+  void set_error_code_sensor(sensor::Sensor *s)               { s_error_code_     = s; }
+  void set_status_text_sensor(text_sensor::TextSensor *s)     { s_status_text_    = s; }
+  void set_error_text_sensor(text_sensor::TextSensor *s)      { s_error_text_     = s; }
+  void set_software_version_sensor(text_sensor::TextSensor *s){ s_sw_version_     = s; }
+  void set_status_report_sensor(text_sensor::TextSensor *s)   { s_status_report_  = s; }
 
-  void set_status_text_sensor(text_sensor::TextSensor *s)     { s_status_text_     = s; }
-  void set_error_text_sensor(text_sensor::TextSensor *s)      { s_error_text_      = s; }
-  void set_software_version_sensor(text_sensor::TextSensor *s){ s_sw_version_      = s; }
-  void set_status_report_sensor(text_sensor::TextSensor *s)  { s_status_report_   = s; }
-
-  // Called from UART debug lambda (bytes consumed by uart_debug before loop())
-  void process_incoming_byte(uint8_t byte) { process_byte(byte); }
-
-  // Triggered by the HA diagnostic button – formats last known status
+  // ── Publish status report (called from YAML diagnostic button) ─────────────
   void publish_status_report() {
     if (!s_status_report_) return;
     char buf[256];
@@ -109,16 +108,36 @@ class Autotherm2DClimate : public climate::Climate,
     this->fan_mode           = climate::CLIMATE_FAN_ON;
     this->set_custom_preset_(PRESET_T_HEATER);
     this->publish_state();
-    ESP_LOGD("autotherm2d", "Autotherm2D ready");
+    ESP_LOGD("autotherm2d", "Autotherm2DClimate ready (heater ↔ controller bridge + parser)");
   }
 
   void loop() override {
-    // Bytes are fed via process_incoming_byte() from the UART debug lambda.
-    // We only handle the parser timeout here.
     const uint32_t now = millis();
+
+    // Parser timeout guard
     if (read_state_ != 0 && (now - parse_start_ms_) > PARSER_TIMEOUT_MS) {
-      ESP_LOGW("autotherm2d", "Parser timeout (state=%d) – reset", read_state_);
+      ESP_LOGW("autotherm2d", "Parser timeout – reset");
       reset_parser();
+    }
+
+    bool got_byte = false;
+    while (available()) {
+      uint8_t b;
+      read_byte(&b);
+      // Forward heater response to controller panel (UART1 TX)
+      if (ctrl_uart_) ctrl_uart_->write_byte(b);
+      // Buffer for hex frame logging
+      heater_frame_buf_.push_back(b);
+      // Feed parser
+      process_byte(b);
+      got_byte = true;
+    }
+    if (got_byte) last_heater_rx_ms_ = now;
+
+    // Log complete heater frame at DEBUG after 50 ms silence
+    if (!heater_frame_buf_.empty() && (now - last_heater_rx_ms_) > 50) {
+      log_heater_frame();
+      heater_frame_buf_.clear();
     }
   }
 
@@ -162,7 +181,7 @@ class Autotherm2DClimate : public climate::Climate,
     if (!preset_ref.empty()) {
       power_mode_ = preset_to_power_mode(preset_ref.c_str());
       this->set_custom_preset_(preset_ref.c_str());
-      last_sent_air_temp_ = NAN;   // reset smoothing on preset change
+      last_sent_air_temp_ = NAN;
       needs_send = true;
     }
     if (needs_send && this->mode == climate::CLIMATE_MODE_HEAT)
@@ -171,17 +190,19 @@ class Autotherm2DClimate : public climate::Climate,
   }
 
  private:
-  // ── Sensor pointers ────────────────────────────────────────────────────────
-  sensor::Sensor *s_intake_temp_{nullptr};
-  sensor::Sensor *s_battery_voltage_{nullptr};
-  sensor::Sensor *s_air_temp_{nullptr};
-  sensor::Sensor *s_panel_temp_{nullptr};
-  sensor::Sensor *s_power_level_{nullptr};
-  sensor::Sensor *s_fan_actual_{nullptr};
-  sensor::Sensor *s_status_code_{nullptr};
-  sensor::Sensor *s_error_code_{nullptr};
-  sensor::Sensor *s_air_temp_source_{nullptr};
+  // ── UART references ────────────────────────────────────────────────────────
+  uart::UARTComponent  *ctrl_uart_{nullptr};       // UART1 for forwarding
+  sensor::Sensor       *s_air_temp_source_{nullptr};
 
+  // ── Sensor pointers ────────────────────────────────────────────────────────
+  sensor::Sensor         *s_intake_temp_{nullptr};
+  sensor::Sensor         *s_battery_voltage_{nullptr};
+  sensor::Sensor         *s_air_temp_{nullptr};
+  sensor::Sensor         *s_panel_temp_{nullptr};
+  sensor::Sensor         *s_power_level_{nullptr};
+  sensor::Sensor         *s_fan_actual_{nullptr};
+  sensor::Sensor         *s_status_code_{nullptr};
+  sensor::Sensor         *s_error_code_{nullptr};
   text_sensor::TextSensor *s_status_text_{nullptr};
   text_sensor::TextSensor *s_error_text_{nullptr};
   text_sensor::TextSensor *s_sw_version_{nullptr};
@@ -190,24 +211,20 @@ class Autotherm2DClimate : public climate::Climate,
   // ── Control state ──────────────────────────────────────────────────────────
   uint8_t temp_set_    {15};
   uint8_t power_mode_  {1};
-  uint8_t vent_cmd_    {1};    // outgoing vent: 1=On, 2=Off
+  uint8_t vent_cmd_    {1};
   uint8_t power_level_ {4};
   uint8_t major_state_ {0};
-
   float   last_sent_air_temp_{NAN};
   bool    version_requested_{false};
 
-  // Snapshot of last 0x0F status – used by publish_status_report()
+  // ── Status snapshot (for publish_status_report) ────────────────────────────
   uint8_t snap_major_{0}, snap_minor_{0}, snap_error_{0};
   int     snap_t1_{0};
   bool    snap_t2_ok_{false};
   int     snap_t2_{0};
-  float   snap_volts_{0};
-  float   snap_flame_c_{0};
+  float   snap_volts_{0}, snap_flame_c_{0}, snap_pump_hz_{0};
   uint8_t snap_fan_sp_{0}, snap_fan_act_{0};
-  float   snap_pump_hz_{0};
-  uint8_t snap_level_{0}, snap_mode_{0};
-  uint8_t snap_vent_{0};
+  uint8_t snap_level_{0}, snap_mode_{0}, snap_vent_{0};
 
   // ── Parser state ───────────────────────────────────────────────────────────
   uint8_t  read_state_{0};
@@ -216,7 +233,22 @@ class Autotherm2DClimate : public climate::Climate,
   std::vector<uint8_t> message_data_;
   uint32_t parse_start_ms_{0};
 
-  // ── Protocol string helpers ────────────────────────────────────────────────
+  // ── Heater frame logging ───────────────────────────────────────────────────
+  std::vector<uint8_t> heater_frame_buf_;
+  uint32_t             last_heater_rx_ms_{0};
+
+  void log_heater_frame() {
+    std::string hex;
+    hex.reserve(heater_frame_buf_.size() * 3);
+    for (size_t i = 0; i < heater_frame_buf_.size(); i++) {
+      char b[4];
+      snprintf(b, sizeof(b), i ? ":%02X" : "%02X", heater_frame_buf_[i]);
+      hex += b;
+    }
+    ESP_LOGD("heater", "→ controller: %s", hex.c_str());
+  }
+
+  // ── Protocol string tables ─────────────────────────────────────────────────
   static const char *state_description(uint8_t major, uint8_t minor) {
     if (major == 0 && minor == 0) return "Sleep/Off";
     if (major == 0 && minor == 1) return "Standby";
@@ -246,11 +278,9 @@ class Autotherm2DClimate : public climate::Climate,
       case 12: return "Over voltage";
       case 13: return "No start – ignition failed";
       case 15: return "Under voltage";
-      case 16: return "Ventilation duration exceeded";
       case 17: return "Fuel pump fault";
       case 20: return "No communication";
       case 29: return "Flame blowout";
-      case 30: return "Flame detected before start";
       case 33: return "Control lockout (3× overheat)";
       case 37: return "Hard lockout – send unlock cmd";
       default: return "Unknown error";
@@ -319,7 +349,7 @@ class Autotherm2DClimate : public climate::Climate,
     frame.push_back((crc >> 8) & 0xFF);
     frame.push_back(crc & 0xFF);
     write_array(frame.data(), frame.size());
-    ESP_LOGD("autotherm2d", "TX %-8s | mode=%s temp=%d°C vent=%s level=%d",
+    ESP_LOGD("autotherm2d", "TX %-8s mode=%s temp=%d°C vent=%s level=%d",
              cmd == CMD_START ? "START" : "UPDATE",
              mode_description(power_mode_), temp_set_,
              vent_cmd_ == 1 ? "On" : "Off", power_level_ + 1);
@@ -333,55 +363,55 @@ class Autotherm2DClimate : public climate::Climate,
     ESP_LOGD("autotherm2d", "TX SHUTDOWN");
   }
 
-  // Send 0x11 (panel/air temperature) to heater
-  void send_temp_0x11(int8_t temp_c, const char *source = "") {
-    std::vector<uint8_t> frame = {
-        0xAA, 0x03, 0x01, 0x00, CMD_PANEL_TEMP,
-        static_cast<uint8_t>(temp_c)};
+  void send_temp_0x11(int8_t temp_c) {
+    std::vector<uint8_t> frame = {0xAA, 0x03, 0x01, 0x00, CMD_PANEL_TEMP,
+                                   static_cast<uint8_t>(temp_c)};
     uint16_t crc = crc16_modbus(frame);
     frame.push_back((crc >> 8) & 0xFF);
     frame.push_back(crc & 0xFF);
     write_array(frame.data(), frame.size());
-    ESP_LOGD("autotherm2d", "TX 0x11 %d°C%s", temp_c, source);
+    ESP_LOGD("autotherm2d", "TX 0x11 %d°C (By T Air / HA sensor)", temp_c);
   }
 
-  // Request firmware version from heater (once)
   void request_version() {
     const uint8_t req[] = {0xAA, 0x03, 0x00, 0x00, 0x06, 0x5E, 0xBC};
     write_array(req, sizeof(req));
     ESP_LOGD("autotherm2d", "TX 0x06 (version request)");
   }
 
-  // ── "By T Air" HA-sensor callback ─────────────────────────────────────────
-  void on_air_temp_source_update(float new_temp) {
-    if (power_mode_ != 3) return;          // only active in By T Air mode
-    if (major_state_ == 0) return;          // only when heater is active
-    if (!std::isfinite(new_temp)) return;   // reject NaN / inf
-    if (new_temp < -40.0f || new_temp > 80.0f) return;  // sanity bounds
+  // ── By T Air temperature smoothing ────────────────────────────────────────
+  void on_air_temp_update(float new_temp) {
+    if (power_mode_ != 3) return;
+    if (major_state_ == 0) return;
+    if (!std::isfinite(new_temp)) return;
+    if (new_temp < -40.0f || new_temp > 80.0f) return;
 
-    // Smooth: limit jump to AIR_TEMP_MAX_JUMP per update
     float target = new_temp;
     if (std::isfinite(last_sent_air_temp_)) {
       float delta = target - last_sent_air_temp_;
       if (std::abs(delta) > AIR_TEMP_MAX_JUMP)
         target = last_sent_air_temp_ + (delta > 0 ? AIR_TEMP_MAX_JUMP : -AIR_TEMP_MAX_JUMP);
     }
-
-    int8_t t_byte = static_cast<int8_t>(std::round(target));
-    send_temp_0x11(t_byte, " (By T Air / HA sensor)");
-    last_sent_air_temp_ = static_cast<float>(t_byte);
+    int8_t t = static_cast<int8_t>(std::round(target));
+    send_temp_0x11(t);
+    last_sent_air_temp_ = static_cast<float>(t);
   }
 
-  // ── State machine ──────────────────────────────────────────────────────────
+  // ── Byte-level state machine ───────────────────────────────────────────────
   void process_byte(uint8_t byte) {
     switch (read_state_) {
       case 0:
-        if (byte == 0xAA) { message_data_.clear(); parse_start_ms_ = millis(); read_state_ = 1; }
+        if (byte == 0xAA) {
+          message_data_.clear();
+          parse_start_ms_ = millis();
+          read_state_ = 1;
+        }
         break;
       case 1: read_state_ = 2; break;
       case 2:
         if (byte == 0 || byte > MAX_PAYLOAD_LEN) {
-          ESP_LOGW("autotherm2d", "Bad length 0x%02X", byte); reset_parser();
+          ESP_LOGW("autotherm2d", "Bad length 0x%02X – reset", byte);
+          reset_parser();
         } else { message_length_ = byte; read_state_ = 3; }
         break;
       case 3: read_state_ = 4; break;
@@ -389,7 +419,10 @@ class Autotherm2DClimate : public climate::Climate,
       case 5:
         message_data_.push_back(byte);
         if (message_data_.size() > MAX_PAYLOAD_LEN) { reset_parser(); break; }
-        if ((int)message_data_.size() >= message_length_) { process_message(); reset_parser(); }
+        if ((int)message_data_.size() >= message_length_) {
+          process_message();
+          reset_parser();
+        }
         break;
       default: reset_parser(); break;
     }
@@ -397,11 +430,11 @@ class Autotherm2DClimate : public climate::Climate,
 
   void process_message() {
     switch (command_id_) {
-      case CMD_STATUS:    handle_status();    break;
-      case CMD_PANEL_TEMP:handle_panel_temp(); break;
-      case CMD_SETTINGS:  handle_settings();  break;
-      case CMD_VERSION:   handle_version();   break;
-      default:            handle_unknown();   break;
+      case CMD_STATUS:     handle_status();     break;
+      case CMD_PANEL_TEMP: handle_panel_temp(); break;
+      case CMD_SETTINGS:   handle_settings();   break;
+      case CMD_VERSION:    handle_version();    break;
+      default:             handle_unknown();    break;
     }
   }
 
@@ -413,66 +446,45 @@ class Autotherm2DClimate : public climate::Climate,
     int     t1     = to_signed_temp(safe_byte(3));
     uint8_t t2_raw = safe_byte(4);
     float   volts  = static_cast<float>((safe_byte(5) << 8) | safe_byte(6)) / 10.0f;
-    uint16_t flame_k = (safe_byte(7) << 8) | safe_byte(8);
-    float   flame_c  = (flame_k > 273) ? (flame_k - 273.15f) : 0.0f;
-    uint8_t fan_sp   = safe_byte(11);
-    uint8_t fan_act  = safe_byte(12);
-    float   pump_hz  = safe_byte(14) / 100.0f;   // ÷100 per schroeder-robert
-    bool    t2_ok    = (t2_raw != 0x7F);
-    int     t2       = to_signed_temp(t2_raw);
+    uint16_t flk   = (safe_byte(7) << 8) | safe_byte(8);
+    float   flame  = (flk > 273) ? (flk - 273.15f) : 0.0f;
+    uint8_t fan_sp = safe_byte(11);
+    uint8_t fan_ac = safe_byte(12);
+    float   pump   = safe_byte(14) / 100.0f;
+    bool    t2_ok  = (t2_raw != 0x7F);
+    int     t2     = to_signed_temp(t2_raw);
 
-    // Log
     if (t2_ok) {
       ESP_LOGD("autotherm2d",
-        "STATUS %d.%d (%s) | Err:%d (%s) | T-intake:%d°C T-out:%d°C | "
-        "%.1fV Flame:%.0f°C | Fan:%d/%dHz Pump:%.2fHz",
+        "STATUS %d.%d (%s) Err:%d(%s) T-in:%d°C T-out:%d°C %.1fV Flame:%.0f°C Fan:%d/%dHz Pump:%.2fHz",
         major, minor, state_description(major, minor), error, error_description(error),
-        t1, t2, volts, flame_c, fan_sp, fan_act, pump_hz);
+        t1, t2, volts, flame, fan_sp, fan_ac, pump);
     } else {
       ESP_LOGD("autotherm2d",
-        "STATUS %d.%d (%s) | Err:%d (%s) | T-intake:%d°C T-out:n/a | "
-        "%.1fV Flame:%.0f°C | Fan:%d/%dHz Pump:%.2fHz",
+        "STATUS %d.%d (%s) Err:%d(%s) T-in:%d°C T-out:n/a %.1fV Flame:%.0f°C Fan:%d/%dHz Pump:%.2fHz",
         major, minor, state_description(major, minor), error, error_description(error),
-        t1, volts, flame_c, fan_sp, fan_act, pump_hz);
+        t1, volts, flame, fan_sp, fan_ac, pump);
     }
 
-    // Request firmware version once after first valid status
-    if (!version_requested_) {
-      version_requested_ = true;
-      request_version();
-    }
+    if (!version_requested_) { version_requested_ = true; request_version(); }
 
     major_state_ = major;
-
-    // Store snapshot for publish_status_report()
     snap_major_ = major; snap_minor_ = minor; snap_error_ = error;
     snap_t1_ = t1; snap_t2_ok_ = t2_ok; snap_t2_ = t2;
-    snap_volts_ = volts; snap_flame_c_ = flame_c;
-    snap_fan_sp_ = fan_sp; snap_fan_act_ = fan_act; snap_pump_hz_ = pump_hz;
+    snap_volts_ = volts; snap_flame_c_ = flame;
+    snap_fan_sp_ = fan_sp; snap_fan_act_ = fan_ac; snap_pump_hz_ = pump;
 
-    // Numeric status code (major * 256 + minor)
-    publish_if(s_status_code_,   static_cast<float>((major << 8) | minor));
-    // Textual status
-    publish_text(s_status_text_, state_description(major, minor));
-    // Error (separate sensor + text)
-    publish_if(s_error_code_,    static_cast<float>(error));
-    publish_text(s_error_text_,  error_description(error));
-
-    // Physical sensors
-    publish_if(s_intake_temp_,     static_cast<float>(t1));
-    // Air/output temp: publish NAN when disconnected (HA shows "unavailable")
+    publish_if(s_status_code_,    static_cast<float>((major << 8) | minor));
+    publish_text(s_status_text_,  state_description(major, minor));
+    publish_if(s_error_code_,     static_cast<float>(error));
+    publish_text(s_error_text_,   error_description(error));
+    publish_if(s_intake_temp_,    static_cast<float>(t1));
     if (s_air_temp_) s_air_temp_->publish_state(t2_ok ? static_cast<float>(t2) : NAN);
     publish_if(s_battery_voltage_, volts);
-    publish_if(s_fan_actual_,      static_cast<float>(fan_act));
+    publish_if(s_fan_actual_,      static_cast<float>(fan_ac));
 
-    // Sync Climate mode with heater state
-    auto new_mode = (major != 0)
-                        ? climate::CLIMATE_MODE_HEAT
-                        : climate::CLIMATE_MODE_OFF;
-    if (new_mode != this->mode) {
-      this->mode = new_mode;
-      this->publish_state();
-    }
+    auto new_mode = (major != 0) ? climate::CLIMATE_MODE_HEAT : climate::CLIMATE_MODE_OFF;
+    if (new_mode != this->mode) { this->mode = new_mode; this->publish_state(); }
   }
 
   // ── 0x11 – Panel temperature ───────────────────────────────────────────────
@@ -485,43 +497,35 @@ class Autotherm2DClimate : public climate::Climate,
   // ── 0x02 – Settings echo ───────────────────────────────────────────────────
   void handle_settings() {
     if (major_state_ == 0) return;
+    bool    use_time = (safe_byte(0) == 0);
+    uint8_t work_min = safe_byte(1);
+    uint8_t mode     = safe_byte(2);
+    uint8_t target   = safe_byte(3);
+    uint8_t vent     = safe_byte(4);
+    uint8_t level    = safe_byte(5);
 
-    bool    use_work_time = (safe_byte(0) == 0);
-    uint8_t work_min      = safe_byte(1);
-    uint8_t mode          = safe_byte(2);
-    uint8_t target        = safe_byte(3);
-    uint8_t vent          = safe_byte(4);   // 0=Off, 1=On (heater encoding)
-    uint8_t level         = safe_byte(5);
-
-    // Update snapshot for status report
     snap_mode_ = mode; snap_level_ = level; snap_vent_ = vent;
 
     ESP_LOGD("autotherm2d",
       "SETTINGS    mode=%-12s target=%d°C vent=%-3s level=%d/10 time=%s",
-      mode_description(mode), target,
-      vent == 1 ? "On" : "Off", level + 1,
-      use_work_time ? (std::to_string(work_min) + "min").c_str() : "unlimited");
+      mode_description(mode), target, vent == 1 ? "On" : "Off", level + 1,
+      use_time ? (std::to_string(work_min) + "min").c_str() : "unlimited");
 
     publish_if(s_power_level_, static_cast<float>(level + 1));
-
     bool changed = false;
-    if (temp_set_ != target)  { temp_set_ = target; this->target_temperature = target; changed = true; }
+    if (temp_set_ != target)   { temp_set_ = target; this->target_temperature = target; changed = true; }
     if (power_level_ != level) { power_level_ = level; changed = true; }
     if (power_mode_ != mode) {
       power_mode_ = mode;
       this->set_custom_preset_(power_mode_to_preset(mode));
       changed = true;
     }
-    auto new_fan = (vent == 1) ? climate::CLIMATE_FAN_ON : climate::CLIMATE_FAN_OFF;
-    if (this->fan_mode != new_fan) {
-      vent_cmd_ = (vent == 1) ? 1 : 2;
-      this->fan_mode = new_fan;
-      changed = true;
-    }
+    auto nf = (vent == 1) ? climate::CLIMATE_FAN_ON : climate::CLIMATE_FAN_OFF;
+    if (this->fan_mode != nf) { vent_cmd_ = (vent == 1) ? 1 : 2; this->fan_mode = nf; changed = true; }
     if (changed) this->publish_state();
   }
 
-  // ── 0x06 – Software version response ──────────────────────────────────────
+  // ── 0x06 – Firmware version ────────────────────────────────────────────────
   void handle_version() {
     if (message_data_.size() < 4) return;
     char buf[24];
@@ -539,8 +543,7 @@ class Autotherm2DClimate : public climate::Climate,
       hex += b;
     }
     if (message_data_.size() > 12) hex += "...";
-    ESP_LOGD("autotherm2d", "CMD 0x%02X len=%-2d %s",
-             command_id_, message_length_, hex.c_str());
+    ESP_LOGD("autotherm2d", "CMD 0x%02X len=%-2d %s", command_id_, message_length_, hex.c_str());
   }
 };
 

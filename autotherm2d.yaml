@@ -1,10 +1,10 @@
 substitutions:
   name: "autotherm2d"
   friendly_name: "Autotherm 2D"
-  device_ip:      "192.168.7.6"
-  gateway_ip:     "192.168.7.1"
+  device_ip:  "192.168.7.6"
+  gateway_ip: "192.168.7.1"
 
-# ── External component ───────────────────────────────────────────────────────
+# ── External component ────────────────────────────────────────────────────────
 external_components:
   - source: github://okionka/ha_autotherm@main
     components: [autotherm2d]
@@ -16,20 +16,32 @@ esphome:
   min_version: 2024.6.0
   name_add_mac_suffix: false
 
-# ── Platform ──────────────────────────────────────────────────────────────────
 esp32:
   board: esp32dev
   framework:
     type: arduino
 
 # ── Logging ───────────────────────────────────────────────────────────────────
+# Global DEBUG so per-component tags work.
+# controller / heater  – raw frame hex (DEBUG)
+# autotherm2d          – interpreted protocol + climate events (DEBUG)
+# Everything else      – reduce to INFO to avoid noise
 logger:
   baud_rate: 0
-  level: INFO            # Global level – keep INFO to avoid noise
+  level: DEBUG
   logs:
-    controller: DEBUG    # UART from panel → heater
-    heater: DEBUG        # UART from heater → panel
-    autotherm2d: DEBUG   # Component internals (TX frames, parser warnings)
+    api: INFO
+    api.connection: INFO
+    mqtt: INFO
+    wifi: INFO
+    ota: INFO
+    safe_mode: INFO
+    mdns: INFO
+    web_server: INFO
+    captive_portal: INFO
+    sensor: INFO
+    text_sensor: INFO
+    climate: INFO
 
 # ── Home Assistant API ────────────────────────────────────────────────────────
 api:
@@ -60,7 +72,7 @@ web_server:
   version: 3
   local: true
 
-# ── Restart button ────────────────────────────────────────────────────────────
+# ── Buttons ───────────────────────────────────────────────────────────────────
 button:
   - platform: restart
     name: "Restart"
@@ -74,52 +86,25 @@ button:
       lambda: id(diesel_heater)->publish_status_report();
 
 # ── UART ──────────────────────────────────────────────────────────────────────
+# UART1: Physical controller panel side (GPIO1 TX → panel, GPIO3 RX ← panel)
+#   Handled by ControllerPanelComponent: forwards panel bytes to UART2 TX,
+#   logs raw frames. No injection, no modification.
 uart:
-  # UART 1 – physical controller panel (transparent pass-through only)
   - id: uart_1_controller
     baud_rate: 9600
     tx_pin: GPIO1
     rx_pin: GPIO3
-    debug:
-      direction: RX
-      dummy_receiver: true
-      after:
-        delimiter: "\r\n"
-      sequence:
-        - uart.write:
-            id: uart_2_heater
-            data: !lambda return bytes;
-        - lambda: |-
-            ESP_LOGD("controller", "→ heater:");
-            UARTDebug::log_hex(direction, bytes, ':');
 
-  # UART 2 – heater bus (read & written by climate component)
+# UART2: Physical heater side (GPIO17 TX → heater, GPIO16 RX ← heater)
+#   Handled by Autotherm2DClimate: forwards heater bytes to UART1 TX,
+#   parses protocol, manages Climate entity, sends HA commands to heater.
   - id: uart_2_heater
     baud_rate: 9600
     tx_pin: GPIO17
     rx_pin: GPIO16
-    debug:
-      direction: RX
-      dummy_receiver: true     # uart_debug consumes bytes; we feed them to the component via lambda
-      after:
-        delimiter: "\r\n"
-      sequence:
-        - uart.write:
-            id: uart_1_controller
-            data: !lambda return bytes;
-        - lambda: |-
-            ESP_LOGD("heater", "→ controller:");
-            UARTDebug::log_hex(direction, bytes, ':');
-            // Feed bytes into the autotherm2d parser
-            for (uint8_t b : bytes) {
-              id(diesel_heater)->process_incoming_byte(b);
-            }
 
-# ── Room temperature sensor ────────────────────────────────────────────────────
-# Pull any sensor entity from Home Assistant.
-# Replace "sensor.living_room_temperature" with your actual entity_id.
-# You can also use a local ESPHome sensor (e.g. DHT22, DS18B20) – just
-# give it an id and reference that id under climate → temperature_sensor.
+# ── Room temperature sensor (current_temperature in HA) ───────────────────────
+# Any ESPHome sensor works: homeassistant, dht, dallas, etc.
 sensor:
   - platform: homeassistant
     id: room_temperature
@@ -128,7 +113,6 @@ sensor:
     filters:
       - filter_out: nan
 
-  # ── Diagnostic / system sensors ──────────────────────────────────────────
   - platform: wifi_signal
     name: "WiFi Signal dB"
     id: wifi_signal_db
@@ -152,26 +136,29 @@ sensor:
 # ── Climate entity ────────────────────────────────────────────────────────────
 climate:
   - platform: autotherm2d
-    id: diesel_heater          # referenced from UART debug lambda
+    id: diesel_heater
     name: "Diesel Heater"
-    uart_id: uart_2_heater
 
-    # ── Room thermometer (current_temperature display in HA) ────────────────
+    # UART2 = heater bus (Autotherm2DClimate reads from here)
+    uart_id: uart_2_heater
+    # UART1 = controller panel bus (ControllerPanelComponent reads from here)
+    panel_uart_id: uart_1_controller
+
+    # Current temperature source
     temperature_sensor: room_temperature
 
-    # ── By T Air: HA sensor → sent as 0x11 to heater when active ───────────
-    # The component smooths large temperature jumps (max 2 °C per update).
-    # Leave out (or set to same as temperature_sensor) if not needed.
-    air_temperature_source: room_temperature   # ← change to your preferred sensor
+    # By T Air mode: HA sensor → sent as 0x11 to heater when preset active
+    # Max 2 °C change per sensor update, NaN/out-of-range values rejected.
+    air_temperature_source: room_temperature   # ← change as needed
 
-    # ── Status / control sensors ────────────────────────────────────────────
+    # ── Status / control ─────────────────────────────────────────────────────
     status_text:
       name: "Heater Status"
 
     power_level:
       name: "Heater Power Level"
 
-    # ── Diagnostic sensors ──────────────────────────────────────────────────
+    # ── Diagnostic ───────────────────────────────────────────────────────────
     status_code:
       name: "Heater Status Code"
       entity_category: diagnostic
