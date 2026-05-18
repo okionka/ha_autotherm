@@ -327,7 +327,7 @@ class Autotherm2DClimate : public climate::Climate,
     float   flame_c  = (flame_k > 273) ? (flame_k - 273.15f) : 0.0f;
     uint8_t fan_sp   = safe_byte(11);
     uint8_t fan_act  = safe_byte(12);
-    float   pump_hz  = safe_byte(14) / 10.0f;
+    float   pump_hz  = safe_byte(14) / 100.0f;  // Hz (÷100 per schroeder-robert)
 
     bool t2_ok = (t2_raw != 0x7F);
     int  t2    = to_signed_temp(t2_raw);
@@ -395,19 +395,22 @@ class Autotherm2DClimate : public climate::Climate,
   void handle_settings() {
     if (major_state_ == 0) return;   // ignore while off
 
-    uint16_t work_min   = (safe_byte(0) << 8) | safe_byte(1);
+    // Byte[0]: work-time flag (0=use, 1=unlimited/ignore)
+    // Byte[1]: work time in minutes (valid when flag=0)
+    bool     use_work_time = (safe_byte(0) == 0);
+    uint8_t  work_min   = safe_byte(1);  // minutes (only valid if use_work_time)
     uint8_t  mode       = safe_byte(2);
     uint8_t  target     = safe_byte(3);
-    uint8_t  vent       = safe_byte(4);  // 0=Off, 1=On
+    uint8_t  vent       = safe_byte(4);  // 0=Off, 1=On  (heater→controller encoding)
     uint8_t  level      = safe_byte(5);  // 0-9
 
     ESP_LOGD("autotherm2d",
-      "SETTINGS    mode=%-12s  target=%d°C  vent=%-3s  level=%d/10  time=%dmin",
+      "SETTINGS    mode=%-12s  target=%d°C  vent=%-3s  level=%d/10  time=%s",
       mode_description(mode),
       target,
       vent == 1 ? "On" : "Off",
       level + 1,
-      work_min);
+      use_work_time ? (std::to_string(work_min) + "min").c_str() : "unlimited");
 
     publish_if(s_power_level_, static_cast<float>(level + 1));
 

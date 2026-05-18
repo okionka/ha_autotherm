@@ -119,7 +119,8 @@ Or use the **ESPHome Dashboard** in Home Assistant → Install → Wirelessly.
 
 > References:
 > [helloworld.schlussdienst.net](https://helloworld.schlussdienst.net/blog/hacking-autoterm-planar-2d) ·
-> [kalutep/AutotermHeaterController](https://github.com/kalutep/AutotermHeaterController/blob/main/serial_communication_protocol.md)
+> [kalutep/AutotermHeaterController](https://github.com/kalutep/AutotermHeaterController/blob/main/serial_communication_protocol.md) ·
+> [schroeder-robert/autoterm-air-2d-serial-control](https://github.com/schroeder-robert/autoterm-air-2d-serial-control)
 
 ### Physical layer
 
@@ -185,11 +186,12 @@ Same 6-byte structure for both commands:
 
 | Byte | Field | Notes |
 |---|---|---|
-| 0–1 | Work time (minutes) | `0xFF 0xFF` = unlimited (controller convention) |
-| 2 | Mode | 1 = By T Heater · 2 = By T Panel · 3 = By T Air · 4 = By Power |
+| 0 | Work-time flag | `0` = use work time from byte 1 · `1` = unlimited (`0xFF` from controller) |
+| 1 | Work time | Minutes, valid when flag = 0. Heater default: 120 min. Controller sends `0xFF` (unlimited) |
+| 2 | Mode | `1` = By T Heater · `2` = By T Panel · `3` = By T Air · `4` = By Power |
 | 3 | Target temperature | °C, range 1–30 |
-| 4 | Ventilation | Controller→Heater: `1` = On · `2` = Off · Heater→Controller: `0` = Off · `1` = On |
-| 5 | Power level | 0–9 (used when Mode = 4; also updated by PID in Modes 1–3) |
+| 4 | Ventilation / wait mode | Controller→Heater: `1` = On · `2` = Off · Heater→Controller: `0` = Off · `1` = On |
+| 5 | Power level | 0–9 (used when Mode = 4; also updated by heater PID in Modes 1–3) |
 
 **`0x01`** triggers ignition. **`0x02`** without payload reads current settings; with payload updates them live.
 
@@ -226,7 +228,7 @@ Heater     ← AA 04 00 00 03 29 7D
 | 7–8 | Flame temperature | `uint16` BE | Kelvin → subtract 273.15 for °C |
 | 11 | Fan setpoint | `uint8` | Hz · `× 60` → RPM |
 | 12 | Fan actual | `uint8` | Hz · `× 60` → RPM |
-| 14 | Fuel pump | `uint8` | `value / 10.0` → Hz |
+| 14 | Fuel pump frequency | `uint8` | `value / 100.0` → Hz (e.g. 0x6D=109 → 1.09 Hz) |
 
 #### Status codes (Major.Minor)
 
