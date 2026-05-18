@@ -49,9 +49,10 @@ CONFIG_SCHEMA = (
     climate.climate_schema(Autotherm2DClimate).extend(
         {
             # UART2 (heater bus) – via uart_id from uart.UART_DEVICE_SCHEMA
-            # UART1 (controller panel bus)
-            cv.Required(CONF_PANEL_UART_ID): cv.use_id(uart.UARTComponent),
-            cv.GenerateID(CONF_PANEL_COMPONENT_ID): cv.declare_id(ControllerPanelComponent),
+            # UART1 (controller panel bus) – OPTIONAL
+            # Omit panel_uart_id to run in virtual-panel mode (ESP32 drives poll cycle)
+            cv.Optional(CONF_PANEL_UART_ID): cv.use_id(uart.UARTComponent),
+            cv.Optional(CONF_PANEL_COMPONENT_ID): cv.declare_id(ControllerPanelComponent),
 
             # Input sensors
             cv.Optional(CONF_TEMPERATURE_SENSOR): cv.use_id(sensor.Sensor),
@@ -125,18 +126,20 @@ async def to_code(config):
     await uart.register_uart_device(var, config)   # UART2
     await climate.register_climate(var, config)
 
-    # ── ControllerPanelComponent (UART1 – panel side) ────────────────────────
-    panel = cg.new_Pvariable(config[CONF_PANEL_COMPONENT_ID])
-    await cg.register_component(panel, {})
+    # ── ControllerPanelComponent (UART1 – panel side, OPTIONAL) ─────────────
+    if CONF_PANEL_UART_ID in config:
+        panel = cg.new_Pvariable(config[CONF_PANEL_COMPONENT_ID])
+        await cg.register_component(panel, {})
 
-    panel_uart = await cg.get_variable(config[CONF_PANEL_UART_ID])
-    cg.add(panel.set_uart_parent(panel_uart))       # UART1 as panel UART
+        panel_uart = await cg.get_variable(config[CONF_PANEL_UART_ID])
+        cg.add(panel.set_uart_parent(panel_uart))       # UART1 as panel UART
 
-    heater_uart = await cg.get_variable(config[uart.CONF_UART_ID])
-    cg.add(panel.set_heater_uart(heater_uart))      # panel → heater TX
+        heater_uart = await cg.get_variable(config[uart.CONF_UART_ID])
+        cg.add(panel.set_heater_uart(heater_uart))      # panel → heater TX
 
-    # Wire UART1 back to climate for heater→controller forwarding
-    cg.add(var.set_controller_uart(panel_uart))
+        # Wire UART1 back to climate for heater→controller forwarding
+        cg.add(var.set_controller_uart(panel_uart))
+        # (if panel_uart_id absent: ctrl_uart_ stays nullptr → virtual-panel mode)
 
     # ── Input sensors ─────────────────────────────────────────────────────────
     if CONF_TEMPERATURE_SENSOR in config:

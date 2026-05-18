@@ -1,11 +1,21 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-//  Autotherm2DClimate
-//  Handles UART2 (physical heater side):
-//    • Reads bytes from heater (UART2 RX)
-//    • Forwards every byte unchanged to controller panel (UART1 TX)
-//    • Parses heater frames and updates Climate entity + sensors
-//    • Sends commands to heater (UART2 TX): start, stop, settings, 0x11
+//  Autotherm2DClimate  (UART2 – physical heater side)
+//
+//  Bridge mode  (ControllerPanelComponent present, ctrl_uart_ set):
+//    • Forwards every heater byte to controller panel (UART1 TX)
+//    • Physical panel drives the poll cycle (0x0F / 0x11 / 0x02)
+//    • HA commands injected on UART2 TX alongside panel commands
+//
+//  Virtual-panel mode  (no ControllerPanelComponent, ctrl_uart_ == nullptr):
+//    • ESP32 drives the poll cycle itself every 2 s
+//    • Heater logging works identically
+//    • HA commands injected normally
+//
+//  In both modes:
+//    • All heater responses are parsed and published to HA
+//    • Climate entity (mode, fan, preset, target/current temperature)
+//    • Diagnostic sensors + status report button
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <cmath>
@@ -23,16 +33,19 @@ static const char *PRESET_T_PANEL  = "By T Panel";
 static const char *PRESET_T_AIR    = "By T Air";
 static const char *PRESET_POWER    = "By Power";
 
-static constexpr uint8_t  CMD_START        = 0x01;
-static constexpr uint8_t  CMD_SETTINGS     = 0x02;
-static constexpr uint8_t  CMD_STOP         = 0x03;
-static constexpr uint8_t  CMD_VERSION      = 0x06;
-static constexpr uint8_t  CMD_STATUS       = 0x0F;
-static constexpr uint8_t  CMD_PANEL_TEMP   = 0x11;
+static constexpr uint8_t  CMD_START          = 0x01;
+static constexpr uint8_t  CMD_SETTINGS       = 0x02;
+static constexpr uint8_t  CMD_STOP           = 0x03;
+static constexpr uint8_t  CMD_VERSION        = 0x06;
+static constexpr uint8_t  CMD_STATUS         = 0x0F;
+static constexpr uint8_t  CMD_PANEL_TEMP     = 0x11;
 
 static constexpr int      MAX_PAYLOAD_LEN    = 64;
 static constexpr uint32_t PARSER_TIMEOUT_MS  = 500;
 static constexpr float    AIR_TEMP_MAX_JUMP  = 2.0f;
+
+// Virtual panel poll cycle (ms between each request step)
+static constexpr uint32_t VPANEL_POLL_MS     = 2000;
 
 
 class Autotherm2DClimate : public climate::Climate,
@@ -41,24 +54,22 @@ class Autotherm2DClimate : public climate::Climate,
  public:
   Autotherm2DClimate() = default;
 
-  // ── UART1 reference for forwarding heater→controller ──────────────────────
+  // ── Optional: UART1 ref for bridge-mode forwarding ─────────────────────────
+  // When set  → bridge mode  (ControllerPanelComponent present)
+  // When null → virtual-panel mode
   void set_controller_uart(uart::UARTComponent *u) { ctrl_uart_ = u; }
 
-  // ── Room temperature sensor (current_temperature display in HA) ────────────
+  // ── Sensor wiring ──────────────────────────────────────────────────────────
   void set_room_temperature_sensor(sensor::Sensor *s) {
     s->add_on_state_callback([this](float v) {
       this->current_temperature = v;
       this->publish_state();
     });
   }
-
-  // ── By T Air: HA sensor → sent as 0x11 when active ────────────────────────
   void set_air_temp_source_sensor(sensor::Sensor *s) {
     s_air_temp_source_ = s;
     s->add_on_state_callback([this](float t) { on_air_temp_update(t); });
   }
-
-  // ── Sensor setters ─────────────────────────────────────────────────────────
   void set_heater_board_temperature_sensor(sensor::Sensor *s) { s_intake_temp_    = s; }
   void set_battery_voltage_sensor(sensor::Sensor *s)          { s_battery_voltage_= s; }
   void set_air_temperature_sensor(sensor::Sensor *s)          { s_air_temp_       = s; }
@@ -72,15 +83,18 @@ class Autotherm2DClimate : public climate::Climate,
   void set_software_version_sensor(text_sensor::TextSensor *s){ s_sw_version_     = s; }
   void set_status_report_sensor(text_sensor::TextSensor *s)   { s_status_report_  = s; }
 
-  // ── Publish status report (called from YAML diagnostic button) ─────────────
+  // ── Diagnostic button: format last-known status into HA text sensor ────────
   void publish_status_report() {
     if (!s_status_report_) return;
-    char buf[256];
+    const char *mode_str = ctrl_uart_ ? "Bridge (physical panel)" : "Virtual panel";
+    char buf[300];
     snprintf(buf, sizeof(buf),
+      "Mode: %s\n"
       "State: %s | Err: %s\n"
-      "Mode: %s | Level: %d/10 | Vent: %s\n"
+      "Regulation: %s | Level: %d/10 | Vent: %s\n"
       "T-intake: %d°C | T-out: %s | Flame: %.0f°C\n"
       "Battery: %.1fV | Fan: %d/%d Hz (%d/%d RPM) | Pump: %.2f Hz",
+      mode_str,
       state_description(snap_major_, snap_minor_),
       error_description(snap_error_),
       mode_description(snap_mode_), snap_level_ + 1,
@@ -108,33 +122,39 @@ class Autotherm2DClimate : public climate::Climate,
     this->fan_mode           = climate::CLIMATE_FAN_ON;
     this->set_custom_preset_(PRESET_T_HEATER);
     this->publish_state();
-    ESP_LOGD("autotherm2d", "Autotherm2DClimate ready (heater ↔ controller bridge + parser)");
+
+    if (ctrl_uart_) {
+      ESP_LOGI("autotherm2d", "Starting in BRIDGE mode (physical panel on UART1)");
+    } else {
+      ESP_LOGI("autotherm2d", "Starting in VIRTUAL-PANEL mode (ESP32 drives poll cycle)");
+    }
   }
 
   void loop() override {
     const uint32_t now = millis();
 
-    // Parser timeout guard
+    // Parser timeout
     if (read_state_ != 0 && (now - parse_start_ms_) > PARSER_TIMEOUT_MS) {
       ESP_LOGW("autotherm2d", "Parser timeout – reset");
       reset_parser();
     }
 
+    // Virtual panel: generate poll cycle when no physical panel present
+    if (ctrl_uart_ == nullptr)
+      virtual_panel_poll(now);
+
+    // Read heater bytes, forward, log, parse
     bool got_byte = false;
     while (available()) {
       uint8_t b;
       read_byte(&b);
-      // Forward heater response to controller panel (UART1 TX)
-      if (ctrl_uart_) ctrl_uart_->write_byte(b);
-      // Buffer for hex frame logging
+      if (ctrl_uart_) ctrl_uart_->write_byte(b);   // bridge: forward to panel
       heater_frame_buf_.push_back(b);
-      // Feed parser
       process_byte(b);
       got_byte = true;
     }
     if (got_byte) last_heater_rx_ms_ = now;
 
-    // Log complete heater frame at DEBUG after 50 ms silence
     if (!heater_frame_buf_.empty() && (now - last_heater_rx_ms_) > 50) {
       log_heater_frame();
       heater_frame_buf_.clear();
@@ -190,11 +210,11 @@ class Autotherm2DClimate : public climate::Climate,
   }
 
  private:
-  // ── UART references ────────────────────────────────────────────────────────
-  uart::UARTComponent  *ctrl_uart_{nullptr};       // UART1 for forwarding
-  sensor::Sensor       *s_air_temp_source_{nullptr};
+  // ── UART / mode ────────────────────────────────────────────────────────────
+  uart::UARTComponent *ctrl_uart_{nullptr};       // null = virtual-panel mode
+  sensor::Sensor      *s_air_temp_source_{nullptr};
 
-  // ── Sensor pointers ────────────────────────────────────────────────────────
+  // ── Sensors ────────────────────────────────────────────────────────────────
   sensor::Sensor         *s_intake_temp_{nullptr};
   sensor::Sensor         *s_battery_voltage_{nullptr};
   sensor::Sensor         *s_air_temp_{nullptr};
@@ -217,7 +237,11 @@ class Autotherm2DClimate : public climate::Climate,
   float   last_sent_air_temp_{NAN};
   bool    version_requested_{false};
 
-  // ── Status snapshot (for publish_status_report) ────────────────────────────
+  // ── Virtual panel state ────────────────────────────────────────────────────
+  uint32_t last_vpanel_poll_ms_{0};
+  uint8_t  vpanel_step_{0};         // 0=0x0F  1=0x11  2=0x02
+
+  // ── Status snapshot ────────────────────────────────────────────────────────
   uint8_t snap_major_{0}, snap_minor_{0}, snap_error_{0};
   int     snap_t1_{0};
   bool    snap_t2_ok_{false};
@@ -226,17 +250,47 @@ class Autotherm2DClimate : public climate::Climate,
   uint8_t snap_fan_sp_{0}, snap_fan_act_{0};
   uint8_t snap_level_{0}, snap_mode_{0}, snap_vent_{0};
 
-  // ── Parser state ───────────────────────────────────────────────────────────
+  // ── Parser ─────────────────────────────────────────────────────────────────
   uint8_t  read_state_{0};
   int      message_length_{0};
   uint8_t  command_id_{0};
   std::vector<uint8_t> message_data_;
   uint32_t parse_start_ms_{0};
 
-  // ── Heater frame logging ───────────────────────────────────────────────────
+  // ── Heater frame log buffer ─────────────────────────────────────────────────
   std::vector<uint8_t> heater_frame_buf_;
   uint32_t             last_heater_rx_ms_{0};
 
+  // ── Virtual panel poll cycle ───────────────────────────────────────────────
+  void virtual_panel_poll(uint32_t now) {
+    if (now - last_vpanel_poll_ms_ < VPANEL_POLL_MS) return;
+    last_vpanel_poll_ms_ = now;
+
+    switch (vpanel_step_) {
+      case 0:   // Status request (0x0F)
+        send_poll_request(CMD_STATUS);
+        ESP_LOGD("autotherm2d", "VPANEL 0x0F status request");
+        break;
+
+      case 1: {  // Panel temperature (0x11)
+        // Prefer current_temperature (room sensor); fall back to target
+        float temp_f = std::isfinite(this->current_temperature)
+                         ? this->current_temperature
+                         : this->target_temperature;
+        int8_t temp_byte = static_cast<int8_t>(std::round(temp_f));
+        send_temp_0x11(temp_byte, " (virtual panel)");
+        break;
+      }
+
+      case 2:  // Settings request (0x02)
+        send_poll_request(CMD_SETTINGS);
+        ESP_LOGD("autotherm2d", "VPANEL 0x02 settings request");
+        break;
+    }
+    vpanel_step_ = (vpanel_step_ + 1) % 3;
+  }
+
+  // ── Raw frame logger ───────────────────────────────────────────────────────
   void log_heater_frame() {
     std::string hex;
     hex.reserve(heater_frame_buf_.size() * 3);
@@ -245,10 +299,11 @@ class Autotherm2DClimate : public climate::Climate,
       snprintf(b, sizeof(b), i ? ":%02X" : "%02X", heater_frame_buf_[i]);
       hex += b;
     }
-    ESP_LOGD("heater", "→ controller: %s", hex.c_str());
+    ESP_LOGD("heater", "→ %s: %s",
+             ctrl_uart_ ? "controller" : "virtual-panel", hex.c_str());
   }
 
-  // ── Protocol string tables ─────────────────────────────────────────────────
+  // ── String tables ──────────────────────────────────────────────────────────
   static const char *state_description(uint8_t major, uint8_t minor) {
     if (major == 0 && minor == 0) return "Sleep/Off";
     if (major == 0 && minor == 1) return "Standby";
@@ -264,7 +319,6 @@ class Autotherm2DClimate : public climate::Climate,
     if (major == 4 && minor == 0) return "Shutdown complete";
     return "Unknown state";
   }
-
   static const char *error_description(uint8_t err) {
     switch (err) {
       case  0: return "OK";
@@ -286,9 +340,8 @@ class Autotherm2DClimate : public climate::Climate,
       default: return "Unknown error";
     }
   }
-
-  static const char *mode_description(uint8_t mode) {
-    switch (mode) {
+  static const char *mode_description(uint8_t m) {
+    switch (m) {
       case 1: return "By T Heater";
       case 2: return "By T Panel";
       case 3: return "By T Air";
@@ -297,23 +350,20 @@ class Autotherm2DClimate : public climate::Climate,
     }
   }
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
+  // ── Utilities ──────────────────────────────────────────────────────────────
   void reset_parser() { read_state_ = 0; message_data_.clear(); }
-
   uint8_t safe_byte(size_t i) const {
     return i < message_data_.size() ? message_data_[i] : 0;
   }
   static int to_signed_temp(uint8_t raw) {
     return (raw > 127) ? (static_cast<int>(raw) - 256) : static_cast<int>(raw);
   }
-  template<typename T>
-  static void publish_if(sensor::Sensor *s, T v) {
+  template<typename T> static void publish_if(sensor::Sensor *s, T v) {
     if (s) s->publish_state(static_cast<float>(v));
   }
   static void publish_text(text_sensor::TextSensor *s, const char *v) {
     if (s) s->publish_state(v);
   }
-
   static uint8_t preset_to_power_mode(const char *p) {
     if (strcmp(p, PRESET_T_PANEL) == 0) return 2;
     if (strcmp(p, PRESET_T_AIR)   == 0) return 3;
@@ -340,7 +390,18 @@ class Autotherm2DClimate : public climate::Climate,
     return crc;
   }
 
-  // ── Frame builders ─────────────────────────────────────────────────────────
+  // ── Frame senders ──────────────────────────────────────────────────────────
+
+  // Poll request with no payload (0x0F, 0x02)
+  void send_poll_request(uint8_t cmd) {
+    std::vector<uint8_t> frame = {0xAA, 0x03, 0x00, 0x00, cmd};
+    uint16_t crc = crc16_modbus(frame);
+    frame.push_back((crc >> 8) & 0xFF);
+    frame.push_back(crc & 0xFF);
+    write_array(frame.data(), frame.size());
+  }
+
+  // Start / update command (0x01 / 0x02 with payload)
   void send_frame(uint8_t cmd) {
     std::vector<uint8_t> frame = {
         0xAA, 0x03, 0x06, 0x00, cmd, 0xFF, 0xFF,
@@ -354,7 +415,6 @@ class Autotherm2DClimate : public climate::Climate,
              mode_description(power_mode_), temp_set_,
              vent_cmd_ == 1 ? "On" : "Off", power_level_ + 1);
   }
-
   void send_control_command() { send_frame(CMD_START); }
 
   void send_shutdown_command() {
@@ -363,55 +423,52 @@ class Autotherm2DClimate : public climate::Climate,
     ESP_LOGD("autotherm2d", "TX SHUTDOWN");
   }
 
-  void send_temp_0x11(int8_t temp_c) {
+  // Panel temperature (0x11)
+  void send_temp_0x11(int8_t temp_c, const char *note = "") {
     std::vector<uint8_t> frame = {0xAA, 0x03, 0x01, 0x00, CMD_PANEL_TEMP,
                                    static_cast<uint8_t>(temp_c)};
     uint16_t crc = crc16_modbus(frame);
     frame.push_back((crc >> 8) & 0xFF);
     frame.push_back(crc & 0xFF);
     write_array(frame.data(), frame.size());
-    ESP_LOGD("autotherm2d", "TX 0x11 %d°C (By T Air / HA sensor)", temp_c);
+    ESP_LOGD("autotherm2d", "TX 0x11 %d°C%s", temp_c, note);
   }
 
   void request_version() {
     const uint8_t req[] = {0xAA, 0x03, 0x00, 0x00, 0x06, 0x5E, 0xBC};
     write_array(req, sizeof(req));
-    ESP_LOGD("autotherm2d", "TX 0x06 (version request)");
+    ESP_LOGD("autotherm2d", "TX 0x06 version request");
   }
 
-  // ── By T Air temperature smoothing ────────────────────────────────────────
+  // ── By T Air smoothing ─────────────────────────────────────────────────────
   void on_air_temp_update(float new_temp) {
     if (power_mode_ != 3) return;
     if (major_state_ == 0) return;
     if (!std::isfinite(new_temp)) return;
     if (new_temp < -40.0f || new_temp > 80.0f) return;
-
     float target = new_temp;
     if (std::isfinite(last_sent_air_temp_)) {
-      float delta = target - last_sent_air_temp_;
-      if (std::abs(delta) > AIR_TEMP_MAX_JUMP)
-        target = last_sent_air_temp_ + (delta > 0 ? AIR_TEMP_MAX_JUMP : -AIR_TEMP_MAX_JUMP);
+      float d = target - last_sent_air_temp_;
+      if (std::abs(d) > AIR_TEMP_MAX_JUMP)
+        target = last_sent_air_temp_ + (d > 0 ? AIR_TEMP_MAX_JUMP : -AIR_TEMP_MAX_JUMP);
     }
     int8_t t = static_cast<int8_t>(std::round(target));
-    send_temp_0x11(t);
+    send_temp_0x11(t, " (By T Air / HA)");
     last_sent_air_temp_ = static_cast<float>(t);
   }
 
-  // ── Byte-level state machine ───────────────────────────────────────────────
+  // ── State machine ──────────────────────────────────────────────────────────
   void process_byte(uint8_t byte) {
     switch (read_state_) {
       case 0:
         if (byte == 0xAA) {
-          message_data_.clear();
-          parse_start_ms_ = millis();
-          read_state_ = 1;
+          message_data_.clear(); parse_start_ms_ = millis(); read_state_ = 1;
         }
         break;
       case 1: read_state_ = 2; break;
       case 2:
         if (byte == 0 || byte > MAX_PAYLOAD_LEN) {
-          ESP_LOGW("autotherm2d", "Bad length 0x%02X – reset", byte);
-          reset_parser();
+          ESP_LOGW("autotherm2d", "Bad length 0x%02X", byte); reset_parser();
         } else { message_length_ = byte; read_state_ = 3; }
         break;
       case 3: read_state_ = 4; break;
@@ -420,8 +477,7 @@ class Autotherm2DClimate : public climate::Climate,
         message_data_.push_back(byte);
         if (message_data_.size() > MAX_PAYLOAD_LEN) { reset_parser(); break; }
         if ((int)message_data_.size() >= message_length_) {
-          process_message();
-          reset_parser();
+          process_message(); reset_parser();
         }
         break;
       default: reset_parser(); break;
@@ -438,63 +494,57 @@ class Autotherm2DClimate : public climate::Climate,
     }
   }
 
-  // ── 0x0F – Status ──────────────────────────────────────────────────────────
   void handle_status() {
-    uint8_t major  = safe_byte(0);
-    uint8_t minor  = safe_byte(1);
-    uint8_t error  = safe_byte(2);
-    int     t1     = to_signed_temp(safe_byte(3));
-    uint8_t t2_raw = safe_byte(4);
-    float   volts  = static_cast<float>((safe_byte(5) << 8) | safe_byte(6)) / 10.0f;
-    uint16_t flk   = (safe_byte(7) << 8) | safe_byte(8);
-    float   flame  = (flk > 273) ? (flk - 273.15f) : 0.0f;
-    uint8_t fan_sp = safe_byte(11);
-    uint8_t fan_ac = safe_byte(12);
-    float   pump   = safe_byte(14) / 100.0f;
-    bool    t2_ok  = (t2_raw != 0x7F);
-    int     t2     = to_signed_temp(t2_raw);
+    uint8_t major = safe_byte(0), minor = safe_byte(1), error = safe_byte(2);
+    int     t1    = to_signed_temp(safe_byte(3));
+    uint8_t t2r   = safe_byte(4);
+    float   volts = static_cast<float>((safe_byte(5) << 8) | safe_byte(6)) / 10.0f;
+    uint16_t flk  = (safe_byte(7) << 8) | safe_byte(8);
+    float   flame = (flk > 273) ? (flk - 273.15f) : 0.0f;
+    uint8_t fsp   = safe_byte(11), fac = safe_byte(12);
+    float   pump  = safe_byte(14) / 100.0f;
+    bool    t2ok  = (t2r != 0x7F);
+    int     t2    = to_signed_temp(t2r);
 
-    if (t2_ok) {
+    if (t2ok) {
       ESP_LOGD("autotherm2d",
         "STATUS %d.%d (%s) Err:%d(%s) T-in:%d°C T-out:%d°C %.1fV Flame:%.0f°C Fan:%d/%dHz Pump:%.2fHz",
         major, minor, state_description(major, minor), error, error_description(error),
-        t1, t2, volts, flame, fan_sp, fan_ac, pump);
+        t1, t2, volts, flame, fsp, fac, pump);
     } else {
       ESP_LOGD("autotherm2d",
         "STATUS %d.%d (%s) Err:%d(%s) T-in:%d°C T-out:n/a %.1fV Flame:%.0f°C Fan:%d/%dHz Pump:%.2fHz",
         major, minor, state_description(major, minor), error, error_description(error),
-        t1, volts, flame, fan_sp, fan_ac, pump);
+        t1, volts, flame, fsp, fac, pump);
     }
 
     if (!version_requested_) { version_requested_ = true; request_version(); }
 
     major_state_ = major;
     snap_major_ = major; snap_minor_ = minor; snap_error_ = error;
-    snap_t1_ = t1; snap_t2_ok_ = t2_ok; snap_t2_ = t2;
+    snap_t1_ = t1; snap_t2_ok_ = t2ok; snap_t2_ = t2;
     snap_volts_ = volts; snap_flame_c_ = flame;
-    snap_fan_sp_ = fan_sp; snap_fan_act_ = fan_ac; snap_pump_hz_ = pump;
+    snap_fan_sp_ = fsp; snap_fan_act_ = fac; snap_pump_hz_ = pump;
 
-    publish_if(s_status_code_,    static_cast<float>((major << 8) | minor));
-    publish_text(s_status_text_,  state_description(major, minor));
-    publish_if(s_error_code_,     static_cast<float>(error));
-    publish_text(s_error_text_,   error_description(error));
-    publish_if(s_intake_temp_,    static_cast<float>(t1));
-    if (s_air_temp_) s_air_temp_->publish_state(t2_ok ? static_cast<float>(t2) : NAN);
+    publish_if(s_status_code_,   static_cast<float>((major << 8) | minor));
+    publish_text(s_status_text_, state_description(major, minor));
+    publish_if(s_error_code_,    static_cast<float>(error));
+    publish_text(s_error_text_,  error_description(error));
+    publish_if(s_intake_temp_,   static_cast<float>(t1));
+    if (s_air_temp_) s_air_temp_->publish_state(t2ok ? static_cast<float>(t2) : NAN);
     publish_if(s_battery_voltage_, volts);
-    publish_if(s_fan_actual_,      static_cast<float>(fan_ac));
+    publish_if(s_fan_actual_,      static_cast<float>(fac));
 
     auto new_mode = (major != 0) ? climate::CLIMATE_MODE_HEAT : climate::CLIMATE_MODE_OFF;
     if (new_mode != this->mode) { this->mode = new_mode; this->publish_state(); }
   }
 
-  // ── 0x11 – Panel temperature ───────────────────────────────────────────────
   void handle_panel_temp() {
     int t = to_signed_temp(safe_byte(0));
     ESP_LOGD("autotherm2d", "PANEL TEMP  %d°C", t);
     publish_if(s_panel_temp_, static_cast<float>(t));
   }
 
-  // ── 0x02 – Settings echo ───────────────────────────────────────────────────
   void handle_settings() {
     if (major_state_ == 0) return;
     bool    use_time = (safe_byte(0) == 0);
@@ -521,11 +571,14 @@ class Autotherm2DClimate : public climate::Climate,
       changed = true;
     }
     auto nf = (vent == 1) ? climate::CLIMATE_FAN_ON : climate::CLIMATE_FAN_OFF;
-    if (this->fan_mode != nf) { vent_cmd_ = (vent == 1) ? 1 : 2; this->fan_mode = nf; changed = true; }
+    if (this->fan_mode != nf) {
+      vent_cmd_ = (vent == 1) ? 1 : 2;
+      this->fan_mode = nf;
+      changed = true;
+    }
     if (changed) this->publish_state();
   }
 
-  // ── 0x06 – Firmware version ────────────────────────────────────────────────
   void handle_version() {
     if (message_data_.size() < 4) return;
     char buf[24];
@@ -535,12 +588,10 @@ class Autotherm2DClimate : public climate::Climate,
     publish_text(s_sw_version_, buf);
   }
 
-  // ── Unknown command ────────────────────────────────────────────────────────
   void handle_unknown() {
     std::string hex;
     for (size_t i = 0; i < message_data_.size() && i < 12; i++) {
-      char b[4]; snprintf(b, sizeof(b), i ? ":%02X" : "%02X", message_data_[i]);
-      hex += b;
+      char b[4]; snprintf(b, sizeof(b), i ? ":%02X" : "%02X", message_data_[i]); hex += b;
     }
     if (message_data_.size() > 12) hex += "...";
     ESP_LOGD("autotherm2d", "CMD 0x%02X len=%-2d %s", command_id_, message_length_, hex.c_str());
