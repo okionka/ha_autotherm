@@ -6,7 +6,7 @@ substitutions:
 
 # ── External component ────────────────────────────────────────────────────────
 external_components:
-  - source: github://okionka/ha_autotherm@main
+  - source: github://okionka/ha_autoterm@main
     components: [autotherm2d]
     refresh: always
 

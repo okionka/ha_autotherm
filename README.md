@@ -1,4 +1,4 @@
-# ha_autotherm – ESPHome Diesel Heater Climate Component
+# ha_autoterm – ESPHome Diesel Heater Climate Component
 
 An ESPHome **external component** that integrates Autotherm Air 2D / Planar 2D
 diesel heaters with Home Assistant as a full **Climate** entity.
@@ -63,7 +63,7 @@ Physical Heater ──UART2.RX──► Autotherm2DClimate
 ## Repository layout
 
 ```
-ha_autotherm/
+ha_autoterm/
 ├── autotherm2d.yaml          # Main ESPHome config (bridge mode example)
 ├── secrets.yaml.example      # Template – copy to secrets.yaml and fill in
 └── components/
@@ -106,7 +106,7 @@ GPIO16 RX  ←  heater TX
 
 ```yaml
 external_components:
-  - source: github://okionka/ha_autotherm@main
+  - source: github://okionka/ha_autoterm@main
     components: [autotherm2d]
 ```
 
