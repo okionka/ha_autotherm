@@ -14,8 +14,49 @@ diesel heaters with Home Assistant as a full **Climate** entity.
 | Presets | `By T Heater` · `By T Panel` · `By T Air` · `By Power` |
 | Target temperature | 0–30 °C in 1 °C steps |
 | Current temperature | Any ESPHome sensor – including HA entities |
-| Diagnostic sensors | Battery voltage, intake temp, output temp, panel temp, flame temp, fan RPM, fuel pump Hz, status code |
-| Safety | Watchdog-safe parser, 500 ms timeout, bounds-checked payload |
+| Diagnostic sensors | Battery voltage, intake temp, output temp, panel temp, fan Hz/RPM, fuel pump, error code, status code, firmware version |
+| Status text sensors | Human-readable heater state + error description |
+| Status report button | Formats full snapshot into a HA text sensor on demand |
+| Operating modes | **Bridge** (physical controller panel present) or **Virtual panel** (ESP32 standalone) |
+
+---
+
+## Operating modes
+
+### Bridge mode – physical controller panel present
+
+```
+Physical Panel ──UART1.RX──► ControllerPanelComponent
+                                  │ loop(): forward byte-by-byte (unchanged)
+                                  │ log: "controller → heater: AA:03:..."
+                              UART2.TX ──► Physical Heater
+
+Physical Heater ──UART2.RX──► Autotherm2DClimate
+                                  │ loop(): forward + parse
+                                  │ log raw: "heater → controller: AA:04:..."
+                                  │ log interpreted: "STATUS 0.1 (Standby) ..."
+                              UART1.TX ──► Physical Panel
+                              UART2.TX ──► Physical Heater  (HA commands)
+```
+
+- The physical panel drives the poll cycle (0x0F / 0x11 / 0x02 requests)
+- All bytes are forwarded transparently – **no modification, no injection** by ControllerPanelComponent
+- HA climate commands are injected on UART2 TX by Autotherm2DClimate
+
+### Virtual-panel mode – ESP32 standalone (no physical panel)
+
+```
+Physical Heater ──UART2.RX──► Autotherm2DClimate
+                                  │ loop(): parse + log
+                                  │ virtual poll every 2 s:
+                                  │   0x0F → 0x11 (room temp) → 0x02
+                              UART2.TX ──► Physical Heater
+```
+
+- ESP32 drives the poll cycle itself every 2 seconds
+- 0x11 panel temperature uses `current_temperature` (room sensor) or `target_temperature` as fallback
+- HA commands injected identically to bridge mode
+- Only UART2 required – no UART1 needed
 
 ---
 
@@ -23,34 +64,39 @@ diesel heaters with Home Assistant as a full **Climate** entity.
 
 ```
 ha_autotherm/
-├── autotherm2d.yaml          # Main ESPHome config (edit this)
+├── autotherm2d.yaml          # Main ESPHome config (bridge mode example)
 ├── secrets.yaml.example      # Template – copy to secrets.yaml and fill in
 └── components/
     └── autotherm2d/
-        ├── __init__.py       # Component namespace declaration
-        ├── climate.py        # ESPHome codegen (climate platform)
-        └── autotherm2d.h     # C++ implementation (header-only)
+        ├── __init__.py       # Component namespace
+        ├── climate.py        # ESPHome codegen – registers both components
+        ├── autotherm2d.h     # Autotherm2DClimate C++ (UART2, heater side)
+        └── panel.h           # ControllerPanelComponent C++ (UART1, panel side)
 ```
 
 ---
 
 ## Hardware wiring
 
+### Bridge mode
+
 ```
-ESP32 dev board
-  GPIO1  (TX) ──→ Controller panel RX   (5V level shift required!)
-  GPIO3  (RX) ←── Controller panel TX
-
-  GPIO17 (TX) ──→ Heater UART RX
-  GPIO16 (RX) ←── Heater UART TX
+Physical Panel ←──5V TTL──→ ESP32 UART1 ←──5V TTL──→ Physical Heater
+                            GPIO1 TX  →  panel RX        GPIO17 TX  →  heater RX
+                            GPIO3  RX ←  panel TX        GPIO16 RX  ←  heater TX
 ```
 
-> **⚠️ Voltage:** The heater bus runs at **5V TTL**. A logic-level shifter
-> (e.g. TXS0108E) is required when connecting to a 3.3V ESP32.
+### Virtual-panel mode
 
-The ESP32 sits transparently between the physical controller panel and the
-heater, forwarding bytes in both directions while parsing heater responses
-and accepting override commands from Home Assistant.
+```
+ESP32 UART2 ←──5V TTL──→ Physical Heater
+GPIO17 TX  →  heater RX
+GPIO16 RX  ←  heater TX
+```
+
+> **⚠️ Voltage level:** The heater bus operates at **5 V TTL**.
+> A bidirectional logic-level shifter (e.g. TXS0108E) is required between the
+> 3.3 V ESP32 and the 5 V UART lines.
 
 ---
 
@@ -64,27 +110,71 @@ external_components:
     components: [autotherm2d]
 ```
 
-ESPHome fetches the component automatically on every compile.
+ESPHome fetches `autotherm2d.h`, `panel.h`, and `climate.py` from GitHub on every compile.
 
 ### 2. Create your secrets file
 
 ```bash
-curl -o secrets.yaml https://raw.githubusercontent.com/okionka/ha_autotherm/main/secrets.yaml.example
-# Edit secrets.yaml with your credentials
+cp secrets.yaml.example secrets.yaml
+# Fill in wifi_ssid, wifi_password, api_encryption_key, ota_password, ap_password
 ```
 
-### 3. Set your room temperature sensor
+### 3. Configure operating mode
+
+**Bridge mode** (physical panel connected to UART1):
+
+```yaml
+uart:
+  - id: uart_1_controller
+    baud_rate: 9600
+    tx_pin: GPIO1
+    rx_pin: GPIO3
+
+  - id: uart_2_heater
+    baud_rate: 9600
+    tx_pin: GPIO17
+    rx_pin: GPIO16
+
+climate:
+  - platform: autotherm2d
+    name: "Diesel Heater"
+    uart_id: uart_2_heater         # heater UART
+    panel_uart_id: uart_1_controller  # controller panel UART → bridge mode
+    temperature_sensor: room_temperature
+```
+
+**Virtual-panel mode** (ESP32 directly on heater, no physical panel):
+
+```yaml
+uart:
+  - id: uart_2_heater
+    baud_rate: 9600
+    tx_pin: GPIO17
+    rx_pin: GPIO16
+
+climate:
+  - platform: autotherm2d
+    name: "Diesel Heater"
+    uart_id: uart_2_heater         # heater UART only
+    # panel_uart_id omitted → virtual-panel mode
+    temperature_sensor: room_temperature
+```
+
+### 4. Set your room temperature sensor
 
 ```yaml
 sensor:
   - platform: homeassistant
     id: room_temperature
     entity_id: sensor.your_temperature_sensor   # ← change this
+    unit_of_measurement: "°C"
+    filters:
+      - filter_out: nan
 ```
 
 Any ESPHome sensor works: `platform: homeassistant`, `platform: dht`, `platform: dallas`, etc.
 
-### 4. Flash
+### 5. Flash
 
 ```bash
 esphome run autotherm2d.yaml
@@ -98,20 +188,64 @@ Or use the **ESPHome Dashboard** in Home Assistant → Install → Wirelessly.
 
 | HA control | Effect |
 |---|---|
-| Mode `OFF` | Sends shutdown command |
-| Mode `HEAT` | Starts heater with current settings |
-| Target temperature | Sets temperature setpoint (0–30 °C) |
-| Fan `ON` / `OFF` | Controls ventilator mode |
+| Mode `OFF` | Sends shutdown command (0x03) |
+| Mode `HEAT` | Starts heater with current settings (0x01) |
+| Target temperature | Sets temperature setpoint 0–30 °C |
+| Fan `ON` / `OFF` | Controls ventilator (start/settings command) |
 | Preset | Selects regulation strategy (see below) |
 
 ### Presets
 
-| Preset | Mode | Description |
+| Preset | Protocol mode | Description |
 |---|---|---|
-| `By T Heater` | 1 | Regulates via heater board sensor |
-| `By T Panel` | 2 | Regulates via controller panel sensor |
-| `By T Air` | 3 | Regulates via inlet air sensor |
-| `By Power` | 4 | Fixed power level, no thermostat |
+| `By T Heater` | 1 | Heater uses its own board temperature sensor |
+| `By T Panel` | 2 | Heater uses temperature from 0x11 messages (controller panel or virtual panel) |
+| `By T Air` | 3 | Heater uses its external air temperature sensor. If `air_temperature_source` is configured, the ESP32 sends 0x11 with that HA sensor value (max 2 °C jump per update, NaN rejected) |
+| `By Power` | 4 | Fixed power level, no thermostat control |
+
+### Diagnostic sensors & entities
+
+| Entity | Type | Description |
+|---|---|---|
+| Heater Status | Text sensor | Human-readable state string |
+| Heater Status Code | Sensor | Numeric `major * 256 + minor` |
+| Heater Error | Text sensor | Error description ("OK", "Flame blowout", …) |
+| Heater Error Code | Sensor | Numeric error code 0–37 |
+| Heater Firmware Version | Text sensor | e.g. `2.1.3.4` (from 0x06 response) |
+| Heater Status Report | Text sensor | Updated by Status Report button |
+| Status Report | Button | Formats full snapshot into Heater Status Report |
+| Heater Board Temperature | Sensor | Intake air temperature (°C) |
+| Heater Battery Voltage | Sensor | Supply voltage (V) |
+| Heater Air Temperature | Sensor | Output / external sensor temp (NaN if disconnected) |
+| Panel Temperature | Sensor | Controller panel ambient temp (from 0x11) |
+| Heater Power Level | Sensor | Current power level 1–10 |
+| Ventilator Power | Sensor | Fan actual frequency (Hz) |
+
+---
+
+## Logger configuration
+
+The component uses three log tags:
+
+| Tag | Content | Recommended level |
+|---|---|---|
+| `autotherm2d` | Interpreted protocol (STATUS, SETTINGS, TX commands) | `DEBUG` |
+| `heater` | Raw frame hex from heater (AA:04:…) | `DEBUG` |
+| `controller` | Raw frame hex from panel (AA:03:…) – bridge mode only | `DEBUG` |
+
+Recommended logger config:
+
+```yaml
+logger:
+  level: DEBUG
+  logs:
+    api: INFO
+    wifi: INFO
+    ota: INFO
+    sensor: INFO
+    text_sensor: INFO
+    climate: INFO
+```
 
 ---
 
@@ -131,34 +265,28 @@ Or use the **ESPHome Dashboard** in Home Assistant → Install → Wirelessly.
 | Data bits | 8 |
 | Parity | None |
 | Stop bits | 1 |
-| Voltage | **5V TTL** |
+| Voltage | **5 V TTL** |
 
-All communication is initiated by the controller panel. The heater only responds; it never sends unsolicited messages.
+All communication is initiated by the controller panel. The heater only responds.
 
 ---
 
 ### Frame structure
 
-Every frame – in both directions – follows this layout:
-
 ```
 Byte 0    Byte 1    Byte 2        Byte 3   Byte 4      Byte 5 … N   N+1   N+2
 ──────────────────────────────────────────────────────────────────────────────
-0xAA      Sender    Payload len   0x00     Command ID  Payload      CRC16 (LE)
+0xAA      Sender    Payload len   0x00     Command ID  Payload      CRC16 (MSB first)
 ```
 
-| Field | Length | Values |
-|---|---|---|
-| Preamble | 1 | Always `0xAA` |
-| Sender | 1 | `0x03` = Controller panel · `0x04` = Heater |
-| Payload length | 1 | Number of bytes in payload field |
-| Reserved | 1 | Always `0x00` |
-| Command ID | 1 | See table below |
-| Payload | N | Command-specific (N = payload length) |
-| CRC-16 | 2 | CRC-16 Modbus, **little-endian** (low byte first) |
-
-**CRC-16 Modbus:** poly `0x8005`, init `0xFFFF`, reflect in/out, XOR out `0x0000`.
-Calculated over all bytes from `0xAA` through the last payload byte.
+| Field | Values |
+|---|---|
+| Preamble | Always `0xAA` |
+| Sender | `0x03` = Controller panel · `0x04` = Heater |
+| Payload length | Number of bytes in payload field (0 for poll requests) |
+| Reserved | Always `0x00` |
+| Command ID | See table below |
+| CRC-16 | CRC-16 Modbus (poly `0x8005`, init `0xFFFF`), MSB first |
 
 ---
 
@@ -166,69 +294,56 @@ Calculated over all bytes from `0xAA` through the last payload byte.
 
 | ID | Name | Direction | Payload len |
 |---|---|---|---|
-| `0x01` | Start | Controller → Heater | 6 |
-| `0x02` | Settings | Controller ↔ Heater | 6 |
+| `0x01` | Start heater | Controller → Heater | 6 |
+| `0x02` | Settings request / echo | Controller ↔ Heater | 0 / 6 |
 | `0x03` | Stop | Controller → Heater | 0 |
-| `0x04` | Serial number | Controller ↔ Heater | 0 / 5 |
-| `0x06` | SW version | Controller ↔ Heater | 0 / 5 |
+| `0x06` | Firmware version | Controller ↔ Heater | 0 / 5 |
 | `0x0F` | Status | Controller ↔ Heater | 0 / 19 |
 | `0x11` | Panel temperature | Controller ↔ Heater | 1 |
-| `0x1C` | Handshake | Controller ↔ Heater | 0 |
-| `0x23` | Ventilation (fan only) | Controller → Heater | 4 |
 
-Regular polling cycle (heater off and on): `0x02` → `0x11` → `0x0F` → `0x11` → repeat (~every 2 s).
+Poll cycle (normal operation): `0x0F` → `0x11` → `0x02` → repeat every ~2 s.
 
 ---
 
-### `0x01` / `0x02` – Start / Settings payload
-
-Same 6-byte structure for both commands:
+### `0x01` / `0x02` – Start / Settings payload (6 bytes)
 
 | Byte | Field | Notes |
 |---|---|---|
-| 0 | Work-time flag | `0` = use work time from byte 1 · `1` = unlimited (`0xFF` from controller) |
-| 1 | Work time | Minutes, valid when flag = 0. Heater default: 120 min. Controller sends `0xFF` (unlimited) |
+| 0 | Work-time flag | `0` = use work time from byte 1 · `1` / `0xFF` = unlimited |
+| 1 | Work time | Minutes (valid when flag = 0). Heater default: 120 min |
 | 2 | Mode | `1` = By T Heater · `2` = By T Panel · `3` = By T Air · `4` = By Power |
 | 3 | Target temperature | °C, range 1–30 |
-| 4 | Ventilation / wait mode | Controller→Heater: `1` = On · `2` = Off · Heater→Controller: `0` = Off · `1` = On |
-| 5 | Power level | 0–9 (used when Mode = 4; also updated by heater PID in Modes 1–3) |
+| 4 | Ventilation | Controller→Heater: `1` = On · `2` = Off ·  Heater→Controller: `0` = Off · `1` = On |
+| 5 | Power level | 0–9 (used in By Power mode; updated by PID in other modes) |
 
-**`0x01`** triggers ignition. **`0x02`** without payload reads current settings; with payload updates them live.
-
-#### Example – Start, By T Panel, 16 °C, vent on, level 3
-
-```
-Controller → AA 03 06 00 01 FF FF 02 10 01 03  [CRC]
-Heater     ← AA 04 06 00 01 FF FF 02 10 01 03  [CRC]
-```
+`0x01` triggers ignition. `0x02` with empty payload reads settings; with payload updates them live.
 
 ---
 
 ### `0x03` – Stop
 
-No payload. Controller sends this to initiate the shutdown/purge sequence.
+No payload. Initiates shutdown / purge sequence.
 
 ```
 Controller → AA 03 00 00 03 5D 7C
-Heater     ← AA 04 00 00 03 29 7D
 ```
 
 ---
 
 ### `0x0F` – Status response payload (19 bytes)
 
-| Offset | Field | Type | Formula / Notes |
+| Offset | Field | Type | Formula |
 |---|---|---|---|
-| 0 | Status major | `uint8` | See state table below |
-| 1 | Status minor | `uint8` | See state table below |
-| 2 | Error code | `uint8` | 0 = OK, see error table below |
-| 3 | Temp 1 (intake air) | `int8` | °C · `0x7F` = sensor disconnected |
-| 4 | Temp 2 (output / ext) | `int8` | °C · `0x7F` = sensor disconnected |
-| 5–6 | Supply voltage | `uint16` BE | `value / 10.0` → V |
-| 7–8 | Flame temperature | `uint16` BE | Kelvin → subtract 273.15 for °C |
+| 0 | Status major | `uint8` | See state table |
+| 1 | Status minor | `uint8` | See state table |
+| 2 | Error code | `uint8` | 0 = OK, see error table |
+| 3 | Temp 1 – intake air | `int8` | °C · `0x7F` = disconnected |
+| 4 | Temp 2 – output / ext | `int8` | °C · `0x7F` = disconnected |
+| 5–6 | Supply voltage | `uint16` BE | `÷ 10` → V |
+| 7–8 | Flame / heat exchanger temp | `uint16` BE | Kelvin − 273.15 → °C |
 | 11 | Fan setpoint | `uint8` | Hz · `× 60` → RPM |
 | 12 | Fan actual | `uint8` | Hz · `× 60` → RPM |
-| 14 | Fuel pump frequency | `uint8` | `value / 100.0` → Hz (e.g. 0x6D=109 → 1.09 Hz) |
+| 14 | Fuel pump frequency | `uint8` | `÷ 100` → Hz (typical 0.5–2 Hz) |
 
 #### Status codes (Major.Minor)
 
@@ -239,12 +354,12 @@ Heater     ← AA 04 00 00 03 29 7D
 | 1 | 0 | Purge: cooling flame sensor |
 | 1 | 1 | Purge: ventilating combustion chamber |
 | 2 | 1 | Pre-heat (glow plug on) |
-| 2 | 2 | Ignition sequence 1 |
-| 2 | 3 | Ignition sequence 2 |
-| 2 | 4 | Ramp up (stabilising combustion) |
+| 2 | 2 | Ignition seq 1 |
+| 2 | 3 | Ignition seq 2 |
+| 2 | 4 | Ramp up |
 | 3 | 0 | **Heating – PID active** |
 | 3 | 35 | Ventilation only (fan mode) |
-| 3 | 4 | Cooling down / stopping |
+| 3 | 4 | Cooling down |
 | 4 | 0 | Shutdown complete |
 
 #### Error codes
@@ -266,42 +381,73 @@ Heater     ← AA 04 00 00 03 29 7D
 | 20 | No communication |
 | 29 | Flame blowout during operation |
 | 33 | Control lockout (3× overheat) |
-| 37 | **Hard lockout** – send `0x0D` unlock command to reset |
+| 37 | **Hard lockout** – send unlock command `0x0D` to reset |
 
 ---
 
-### `0x11` – Panel temperature payload (1 byte)
+### `0x06` – Firmware version response (5 bytes)
+
+| Byte | Field |
+|---|---|
+| 0 | Major |
+| 1 | Minor |
+| 2 | Patch |
+| 3 | Build |
+| 4 | Bootloader version |
+
+Requested once by the ESP32 after receiving the first valid status message.
+
+---
+
+### `0x11` – Panel temperature (1 byte)
 
 | Byte | Field | Type |
 |---|---|---|
 | 0 | Panel temperature | `int8` °C |
 
-The controller reports its ambient temperature to the heater once per poll cycle. The heater echoes the same value. Relevant when operating in **By T Panel** mode.
+The controller reports its ambient temperature once per poll cycle. The heater
+echoes the same value. Used by the heater in **By T Panel** mode.
+
+In virtual-panel mode the ESP32 sends the configured `temperature_sensor` value.
+In **By T Air** mode with `air_temperature_source` configured, the ESP32 sends
+that sensor's value (smoothed to max 2 °C change per update).
 
 ---
 
-### Annotated log example (heater idle)
+### Annotated log example (heater idle, bridge mode)
 
 ```
-# Controller polls settings (no payload)
-AA 03 00 00 02  [CRC]
+# ControllerPanelComponent forwards panel bytes:
+[D][controller]: → heater: AA:03:00:00:02         ← settings request (no payload)
 
-# Heater responds: 120 min · By T Panel · 15 °C · vent off · level 5
-AA 04 06 00 02  00 78  02  0F  00  05  [CRC]
-                time   mode temp vent lvl
+# Autotherm2DClimate receives heater response:
+[D][heater]:     → controller: AA:04:06:00:02:00:78:02:0F:00:05:39:3D
+[D][autotherm2d]: SETTINGS    mode=By T Panel  target=15°C  vent=Off  level=6/10  time=120min
 
-# Controller polls status (no payload)
-AA 03 00 00 0F  [CRC]
+[D][controller]: → heater: AA:03:00:00:0F         ← status poll
+[D][heater]:     → controller: AA:04:13:00:0F:00:01:00:14:7F:00:91:01:25:...
+[D][autotherm2d]: STATUS 0.1 (Standby) Err:0(OK) T-in:20°C T-out:n/a 14.5V Flame:20°C Fan:0/0Hz Pump:0.00Hz
 
-# Heater responds: standby 0.1, no error, 20 °C intake, 13.2 V, flame 20 °C
-AA 04 13 00 0F  00 01  00  14  7F  00 84  01 25  00 00  00  00  ...  [CRC]
-                maj min err t1  t2  voltage    flame_K  ..  fan  pump
+[D][controller]: → heater: AA:03:01:00:11:0D      ← panel temp 13 °C
+[D][heater]:     → controller: AA:04:01:00:11:0D:B8:25
+[D][autotherm2d]: PANEL TEMP  13°C
+```
 
-# Controller reports panel temp 13 °C
-AA 03 01 00 11  0D  [CRC]
+### Annotated log example (virtual-panel mode)
 
-# Heater echoes panel temp
-AA 04 01 00 11  0D  [CRC]
+```
+[I][autotherm2d]: Starting in VIRTUAL-PANEL mode (ESP32 drives poll cycle)
+
+[D][autotherm2d]: VPANEL 0x0F status request
+[D][heater]:     → virtual-panel: AA:04:13:00:0F:...
+[D][autotherm2d]: STATUS 0.1 (Standby) ...
+
+[D][autotherm2d]: TX 0x11 12°C (virtual panel)
+[D][heater]:     → virtual-panel: AA:04:01:00:11:0C:...
+
+[D][autotherm2d]: VPANEL 0x02 settings request
+[D][heater]:     → virtual-panel: AA:04:06:00:02:...
+[D][autotherm2d]: SETTINGS    mode=By T Heater  target=15°C  vent=On  level=5/10  time=120min
 ```
 
 ---
