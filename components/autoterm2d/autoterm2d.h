@@ -1,6 +1,6 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-//  Autotherm2DClimate  (UART2 – physical heater side)
+//  Autoterm2DClimate  (UART2 – physical heater side)
 //
 //  Bridge mode  (ControllerPanelComponent present, ctrl_uart_ set):
 //    • Forwards every heater byte to controller panel (UART1 TX)
@@ -26,7 +26,7 @@
 #include "esphome/components/uart/uart.h"
 
 namespace esphome {
-namespace autotherm2d {
+namespace autoterm2d {
 
 static const char *PRESET_T_HEATER = "By T Heater";
 static const char *PRESET_T_PANEL  = "By T Panel";
@@ -48,11 +48,11 @@ static constexpr float    AIR_TEMP_MAX_JUMP  = 2.0f;
 static constexpr uint32_t VPANEL_POLL_MS     = 2000;
 
 
-class Autotherm2DClimate : public climate::Climate,
+class Autoterm2DClimate : public climate::Climate,
                             public Component,
                             public uart::UARTDevice {
  public:
-  Autotherm2DClimate() = default;
+  Autoterm2DClimate() = default;
 
   // ── Optional: UART1 ref for bridge-mode forwarding ─────────────────────────
   // When set  → bridge mode  (ControllerPanelComponent present)
@@ -107,7 +107,7 @@ class Autotherm2DClimate : public climate::Climate,
       snap_fan_sp_ * 60, snap_fan_act_ * 60,
       snap_pump_hz_);
     s_status_report_->publish_state(buf);
-    ESP_LOGI("autotherm2d", "Status report:\n%s", buf);
+    ESP_LOGI("autoterm2d", "Status report:\n%s", buf);
   }
 
   // ── ESPHome Component ──────────────────────────────────────────────────────
@@ -124,9 +124,9 @@ class Autotherm2DClimate : public climate::Climate,
     this->publish_state();
 
     if (ctrl_uart_) {
-      ESP_LOGI("autotherm2d", "Starting in BRIDGE mode (physical panel on UART1)");
+      ESP_LOGI("autoterm2d", "Starting in BRIDGE mode (physical panel on UART1)");
     } else {
-      ESP_LOGI("autotherm2d", "Starting in VIRTUAL-PANEL mode (ESP32 drives poll cycle)");
+      ESP_LOGI("autoterm2d", "Starting in VIRTUAL-PANEL mode (ESP32 drives poll cycle)");
     }
   }
 
@@ -135,7 +135,7 @@ class Autotherm2DClimate : public climate::Climate,
 
     // Parser timeout
     if (read_state_ != 0 && (now - parse_start_ms_) > PARSER_TIMEOUT_MS) {
-      ESP_LOGW("autotherm2d", "Parser timeout – reset");
+      ESP_LOGW("autoterm2d", "Parser timeout – reset");
       reset_parser();
     }
 
@@ -269,7 +269,7 @@ class Autotherm2DClimate : public climate::Climate,
     switch (vpanel_step_) {
       case 0:   // Status request (0x0F)
         send_poll_request(CMD_STATUS);
-        ESP_LOGD("autotherm2d", "VPANEL 0x0F status request");
+        ESP_LOGD("autoterm2d", "VPANEL 0x0F status request");
         break;
 
       case 1: {  // Panel temperature (0x11)
@@ -284,7 +284,7 @@ class Autotherm2DClimate : public climate::Climate,
 
       case 2:  // Settings request (0x02)
         send_poll_request(CMD_SETTINGS);
-        ESP_LOGD("autotherm2d", "VPANEL 0x02 settings request");
+        ESP_LOGD("autoterm2d", "VPANEL 0x02 settings request");
         break;
     }
     vpanel_step_ = (vpanel_step_ + 1) % 3;
@@ -410,7 +410,7 @@ class Autotherm2DClimate : public climate::Climate,
     frame.push_back((crc >> 8) & 0xFF);
     frame.push_back(crc & 0xFF);
     write_array(frame.data(), frame.size());
-    ESP_LOGD("autotherm2d", "TX %-8s mode=%s temp=%d°C vent=%s level=%d",
+    ESP_LOGD("autoterm2d", "TX %-8s mode=%s temp=%d°C vent=%s level=%d",
              cmd == CMD_START ? "START" : "UPDATE",
              mode_description(power_mode_), temp_set_,
              vent_cmd_ == 1 ? "On" : "Off", power_level_ + 1);
@@ -420,7 +420,7 @@ class Autotherm2DClimate : public climate::Climate,
   void send_shutdown_command() {
     const uint8_t raw[] = {0xAA, 0x03, 0x00, 0x00, 0x03, 0x5D, 0x7C};
     write_array(raw, sizeof(raw));
-    ESP_LOGD("autotherm2d", "TX SHUTDOWN");
+    ESP_LOGD("autoterm2d", "TX SHUTDOWN");
   }
 
   // Panel temperature (0x11)
@@ -431,13 +431,13 @@ class Autotherm2DClimate : public climate::Climate,
     frame.push_back((crc >> 8) & 0xFF);
     frame.push_back(crc & 0xFF);
     write_array(frame.data(), frame.size());
-    ESP_LOGD("autotherm2d", "TX 0x11 %d°C%s", temp_c, note);
+    ESP_LOGD("autoterm2d", "TX 0x11 %d°C%s", temp_c, note);
   }
 
   void request_version() {
     const uint8_t req[] = {0xAA, 0x03, 0x00, 0x00, 0x06, 0x5E, 0xBC};
     write_array(req, sizeof(req));
-    ESP_LOGD("autotherm2d", "TX 0x06 version request");
+    ESP_LOGD("autoterm2d", "TX 0x06 version request");
   }
 
   // ── By T Air smoothing ─────────────────────────────────────────────────────
@@ -468,7 +468,7 @@ class Autotherm2DClimate : public climate::Climate,
       case 1: read_state_ = 2; break;
       case 2:
         if (byte == 0 || byte > MAX_PAYLOAD_LEN) {
-          ESP_LOGW("autotherm2d", "Bad length 0x%02X", byte); reset_parser();
+          ESP_LOGW("autoterm2d", "Bad length 0x%02X", byte); reset_parser();
         } else { message_length_ = byte; read_state_ = 3; }
         break;
       case 3: read_state_ = 4; break;
@@ -507,12 +507,12 @@ class Autotherm2DClimate : public climate::Climate,
     int     t2    = to_signed_temp(t2r);
 
     if (t2ok) {
-      ESP_LOGD("autotherm2d",
+      ESP_LOGD("autoterm2d",
         "STATUS %d.%d (%s) Err:%d(%s) T-in:%d°C T-out:%d°C %.1fV Flame:%.0f°C Fan:%d/%dHz Pump:%.2fHz",
         major, minor, state_description(major, minor), error, error_description(error),
         t1, t2, volts, flame, fsp, fac, pump);
     } else {
-      ESP_LOGD("autotherm2d",
+      ESP_LOGD("autoterm2d",
         "STATUS %d.%d (%s) Err:%d(%s) T-in:%d°C T-out:n/a %.1fV Flame:%.0f°C Fan:%d/%dHz Pump:%.2fHz",
         major, minor, state_description(major, minor), error, error_description(error),
         t1, volts, flame, fsp, fac, pump);
@@ -541,7 +541,7 @@ class Autotherm2DClimate : public climate::Climate,
 
   void handle_panel_temp() {
     int t = to_signed_temp(safe_byte(0));
-    ESP_LOGD("autotherm2d", "PANEL TEMP  %d°C", t);
+    ESP_LOGD("autoterm2d", "PANEL TEMP  %d°C", t);
     publish_if(s_panel_temp_, static_cast<float>(t));
   }
 
@@ -556,7 +556,7 @@ class Autotherm2DClimate : public climate::Climate,
 
     snap_mode_ = mode; snap_level_ = level; snap_vent_ = vent;
 
-    ESP_LOGD("autotherm2d",
+    ESP_LOGD("autoterm2d",
       "SETTINGS    mode=%-12s target=%d°C vent=%-3s level=%d/10 time=%s",
       mode_description(mode), target, vent == 1 ? "On" : "Off", level + 1,
       use_time ? (std::to_string(work_min) + "min").c_str() : "unlimited");
@@ -584,7 +584,7 @@ class Autotherm2DClimate : public climate::Climate,
     char buf[24];
     snprintf(buf, sizeof(buf), "%d.%d.%d.%d",
              safe_byte(0), safe_byte(1), safe_byte(2), safe_byte(3));
-    ESP_LOGI("autotherm2d", "Firmware: %s (bootloader v%d)", buf, safe_byte(4));
+    ESP_LOGI("autoterm2d", "Firmware: %s (bootloader v%d)", buf, safe_byte(4));
     publish_text(s_sw_version_, buf);
   }
 
@@ -594,9 +594,9 @@ class Autotherm2DClimate : public climate::Climate,
       char b[4]; snprintf(b, sizeof(b), i ? ":%02X" : "%02X", message_data_[i]); hex += b;
     }
     if (message_data_.size() > 12) hex += "...";
-    ESP_LOGD("autotherm2d", "CMD 0x%02X len=%-2d %s", command_id_, message_length_, hex.c_str());
+    ESP_LOGD("autoterm2d", "CMD 0x%02X len=%-2d %s", command_id_, message_length_, hex.c_str());
   }
 };
 
-}  // namespace autotherm2d
+}  // namespace autoterm2d
 }  // namespace esphome

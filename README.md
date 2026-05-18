@@ -31,7 +31,7 @@ Physical Panel ──UART1.RX──► ControllerPanelComponent
                                   │ log: "controller → heater: AA:03:..."
                               UART2.TX ──► Physical Heater
 
-Physical Heater ──UART2.RX──► Autotherm2DClimate
+Physical Heater ──UART2.RX──► Autoterm2DClimate
                                   │ loop(): forward + parse
                                   │ log raw: "heater → controller: AA:04:..."
                                   │ log interpreted: "STATUS 0.1 (Standby) ..."
@@ -41,12 +41,12 @@ Physical Heater ──UART2.RX──► Autotherm2DClimate
 
 - The physical panel drives the poll cycle (0x0F / 0x11 / 0x02 requests)
 - All bytes are forwarded transparently – **no modification, no injection** by ControllerPanelComponent
-- HA climate commands are injected on UART2 TX by Autotherm2DClimate
+- HA climate commands are injected on UART2 TX by Autoterm2DClimate
 
 ### Virtual-panel mode – ESP32 standalone (no physical panel)
 
 ```
-Physical Heater ──UART2.RX──► Autotherm2DClimate
+Physical Heater ──UART2.RX──► Autoterm2DClimate
                                   │ loop(): parse + log
                                   │ virtual poll every 2 s:
                                   │   0x0F → 0x11 (room temp) → 0x02
@@ -64,13 +64,13 @@ Physical Heater ──UART2.RX──► Autotherm2DClimate
 
 ```
 ha_autoterm/
-├── autotherm2d.yaml          # Main ESPHome config (bridge mode example)
+├── autoterm2d.yaml          # Main ESPHome config (bridge mode example)
 ├── secrets.yaml.example      # Template – copy to secrets.yaml and fill in
 └── components/
-    └── autotherm2d/
+    └── autoterm2d/
         ├── __init__.py       # Component namespace
         ├── climate.py        # ESPHome codegen – registers both components
-        ├── autotherm2d.h     # Autotherm2DClimate C++ (UART2, heater side)
+        ├── autoterm2d.h     # Autoterm2DClimate C++ (UART2, heater side)
         └── panel.h           # ControllerPanelComponent C++ (UART1, panel side)
 ```
 
@@ -107,10 +107,10 @@ GPIO16 RX  ←  heater TX
 ```yaml
 external_components:
   - source: github://okionka/ha_autoterm@main
-    components: [autotherm2d]
+    components: [autoterm2d]
 ```
 
-ESPHome fetches `autotherm2d.h`, `panel.h`, and `climate.py` from GitHub on every compile.
+ESPHome fetches `autoterm2d.h`, `panel.h`, and `climate.py` from GitHub on every compile.
 
 ### 2. Create your secrets file
 
@@ -136,7 +136,7 @@ uart:
     rx_pin: GPIO16
 
 climate:
-  - platform: autotherm2d
+  - platform: autoterm2d
     name: "Diesel Heater"
     uart_id: uart_2_heater         # heater UART
     panel_uart_id: uart_1_controller  # controller panel UART → bridge mode
@@ -153,7 +153,7 @@ uart:
     rx_pin: GPIO16
 
 climate:
-  - platform: autotherm2d
+  - platform: autoterm2d
     name: "Diesel Heater"
     uart_id: uart_2_heater         # heater UART only
     # panel_uart_id omitted → virtual-panel mode
@@ -177,7 +177,7 @@ Any ESPHome sensor works: `platform: homeassistant`, `platform: dht`, `platform:
 ### 5. Flash
 
 ```bash
-esphome run autotherm2d.yaml
+esphome run autoterm2d.yaml
 ```
 
 Or use the **ESPHome Dashboard** in Home Assistant → Install → Wirelessly.
@@ -229,7 +229,7 @@ The component uses three log tags:
 
 | Tag | Content | Recommended level |
 |---|---|---|
-| `autotherm2d` | Interpreted protocol (STATUS, SETTINGS, TX commands) | `DEBUG` |
+| `autoterm2d` | Interpreted protocol (STATUS, SETTINGS, TX commands) | `DEBUG` |
 | `heater` | Raw frame hex from heater (AA:04:…) | `DEBUG` |
 | `controller` | Raw frame hex from panel (AA:03:…) – bridge mode only | `DEBUG` |
 
@@ -420,34 +420,34 @@ that sensor's value (smoothed to max 2 °C change per update).
 # ControllerPanelComponent forwards panel bytes:
 [D][controller]: → heater: AA:03:00:00:02         ← settings request (no payload)
 
-# Autotherm2DClimate receives heater response:
+# Autoterm2DClimate receives heater response:
 [D][heater]:     → controller: AA:04:06:00:02:00:78:02:0F:00:05:39:3D
-[D][autotherm2d]: SETTINGS    mode=By T Panel  target=15°C  vent=Off  level=6/10  time=120min
+[D][autoterm2d]: SETTINGS    mode=By T Panel  target=15°C  vent=Off  level=6/10  time=120min
 
 [D][controller]: → heater: AA:03:00:00:0F         ← status poll
 [D][heater]:     → controller: AA:04:13:00:0F:00:01:00:14:7F:00:91:01:25:...
-[D][autotherm2d]: STATUS 0.1 (Standby) Err:0(OK) T-in:20°C T-out:n/a 14.5V Flame:20°C Fan:0/0Hz Pump:0.00Hz
+[D][autoterm2d]: STATUS 0.1 (Standby) Err:0(OK) T-in:20°C T-out:n/a 14.5V Flame:20°C Fan:0/0Hz Pump:0.00Hz
 
 [D][controller]: → heater: AA:03:01:00:11:0D      ← panel temp 13 °C
 [D][heater]:     → controller: AA:04:01:00:11:0D:B8:25
-[D][autotherm2d]: PANEL TEMP  13°C
+[D][autoterm2d]: PANEL TEMP  13°C
 ```
 
 ### Annotated log example (virtual-panel mode)
 
 ```
-[I][autotherm2d]: Starting in VIRTUAL-PANEL mode (ESP32 drives poll cycle)
+[I][autoterm2d]: Starting in VIRTUAL-PANEL mode (ESP32 drives poll cycle)
 
-[D][autotherm2d]: VPANEL 0x0F status request
+[D][autoterm2d]: VPANEL 0x0F status request
 [D][heater]:     → virtual-panel: AA:04:13:00:0F:...
-[D][autotherm2d]: STATUS 0.1 (Standby) ...
+[D][autoterm2d]: STATUS 0.1 (Standby) ...
 
-[D][autotherm2d]: TX 0x11 12°C (virtual panel)
+[D][autoterm2d]: TX 0x11 12°C (virtual panel)
 [D][heater]:     → virtual-panel: AA:04:01:00:11:0C:...
 
-[D][autotherm2d]: VPANEL 0x02 settings request
+[D][autoterm2d]: VPANEL 0x02 settings request
 [D][heater]:     → virtual-panel: AA:04:06:00:02:...
-[D][autotherm2d]: SETTINGS    mode=By T Heater  target=15°C  vent=On  level=5/10  time=120min
+[D][autoterm2d]: SETTINGS    mode=By T Heater  target=15°C  vent=On  level=5/10  time=120min
 ```
 
 ---

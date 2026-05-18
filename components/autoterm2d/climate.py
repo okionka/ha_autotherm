@@ -2,7 +2,7 @@
 
 Creates two components:
   • ControllerPanelComponent  – transparent UART1 bridge (panel → heater)
-  • Autotherm2DClimate        – UART2 bridge + parser + climate entity
+  • Autoterm2DClimate        – UART2 bridge + parser + climate entity
 """
 import esphome.codegen as cg
 import esphome.config_validation as cv
@@ -17,12 +17,12 @@ DEPENDENCIES = ["uart", "climate"]
 AUTO_LOAD = ["sensor", "text_sensor"]
 CODEOWNERS = ["@okionka"]
 
-autotherm2d_ns = cg.esphome_ns.namespace("autotherm2d")
+autoterm2d_ns = cg.esphome_ns.namespace("autoterm2d")
 
-Autotherm2DClimate = autotherm2d_ns.class_(
-    "Autotherm2DClimate", climate.Climate, cg.Component, uart.UARTDevice,
+Autoterm2DClimate = autoterm2d_ns.class_(
+    "Autoterm2DClimate", climate.Climate, cg.Component, uart.UARTDevice,
 )
-ControllerPanelComponent = autotherm2d_ns.class_(
+ControllerPanelComponent = autoterm2d_ns.class_(
     "ControllerPanelComponent", cg.Component, uart.UARTDevice,
 )
 
@@ -46,7 +46,7 @@ CONF_STATUS_REPORT            = "status_report"
 
 # ── Config schema ─────────────────────────────────────────────────────────────
 CONFIG_SCHEMA = (
-    climate.climate_schema(Autotherm2DClimate).extend(
+    climate.climate_schema(Autoterm2DClimate).extend(
         {
             # UART2 (heater bus) – via uart_id from uart.UART_DEVICE_SCHEMA
             # UART1 (controller panel bus) – OPTIONAL
@@ -120,7 +120,7 @@ CONFIG_SCHEMA = (
 
 # ── Code generation ────────────────────────────────────────────────────────────
 async def to_code(config):
-    # ── Autotherm2DClimate (UART2 – heater side) ─────────────────────────────
+    # ── Autoterm2DClimate (UART2 – heater side) ─────────────────────────────
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)   # UART2

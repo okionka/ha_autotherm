@@ -1,5 +1,5 @@
 substitutions:
-  name: "autotherm2d"
+  name: "autoterm2d"
   friendly_name: "Autotherm 2D"
   device_ip:  "192.168.7.6"
   gateway_ip: "192.168.7.1"
@@ -7,7 +7,7 @@ substitutions:
 # ── External component ────────────────────────────────────────────────────────
 external_components:
   - source: github://okionka/ha_autoterm@main
-    components: [autotherm2d]
+    components: [autoterm2d]
     refresh: always
 
 esphome:
@@ -24,7 +24,7 @@ esp32:
 # ── Logging ───────────────────────────────────────────────────────────────────
 # Global DEBUG so per-component tags work.
 # controller / heater  – raw frame hex (DEBUG)
-# autotherm2d          – interpreted protocol + climate events (DEBUG)
+# autoterm2d          – interpreted protocol + climate events (DEBUG)
 # Everything else      – reduce to INFO to avoid noise
 logger:
   baud_rate: 0
@@ -96,7 +96,7 @@ uart:
     rx_pin: GPIO3
 
 # UART2: Physical heater side (GPIO17 TX → heater, GPIO16 RX ← heater)
-#   Handled by Autotherm2DClimate: forwards heater bytes to UART1 TX,
+#   Handled by Autoterm2DClimate: forwards heater bytes to UART1 TX,
 #   parses protocol, manages Climate entity, sends HA commands to heater.
   - id: uart_2_heater
     baud_rate: 9600
@@ -135,11 +135,11 @@ sensor:
 
 # ── Climate entity ────────────────────────────────────────────────────────────
 climate:
-  - platform: autotherm2d
+  - platform: autoterm2d
     id: diesel_heater
     name: "Diesel Heater"
 
-    # UART2 = heater bus (Autotherm2DClimate reads from here)
+    # UART2 = heater bus (Autoterm2DClimate reads from here)
     uart_id: uart_2_heater
     # UART1 = controller panel bus (ControllerPanelComponent reads from here)
     panel_uart_id: uart_1_controller

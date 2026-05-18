@@ -13,7 +13,7 @@
 #include "esphome/core/log.h"
 
 namespace esphome {
-namespace autotherm2d {
+namespace autoterm2d {
 
 class ControllerPanelComponent : public Component,
                                   public uart::UARTDevice {
@@ -67,5 +67,5 @@ class ControllerPanelComponent : public Component,
   }
 };
 
-}  // namespace autotherm2d
+}  // namespace autoterm2d
 }  // namespace esphome
