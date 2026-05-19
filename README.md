@@ -79,15 +79,23 @@ ha_autoterm/
 ## Hardware wiring
 
 ### Bridge mode
+The ESP32 interacts as a man-in-the-middle between Autoterm Comfort Control and Autoterm Air 2D.
 
 ```
 Physical Panel ←──5V TTL──→ ESP32 UART1 ←──5V TTL──→ Physical Heater
                             GPIO1 TX  →  panel RX        GPIO17 TX  →  heater RX
                             GPIO3  RX ←  panel TX        GPIO16 RX  ←  heater TX
 ```
+ToDo:
+* document wiring
+
+usd components:
+* Power supply: BuckConverter from 12v to 5v (using 12v from Heater) 
+* Signal Level Shifter to convert both TX/RX UART signals from Heater (5v) to esp32 (3,3V)
+* Cable Plugs
 
 ### Virtual-panel mode
-
+The ESP32 e
 ```
 ESP32 UART2 ←──5V TTL──→ Physical Heater
 GPIO17 TX  →  heater RX
