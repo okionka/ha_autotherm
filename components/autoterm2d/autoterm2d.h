@@ -24,6 +24,8 @@
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/uart/uart.h"
+// ── Diagnose-Proxy (TCP-Server für Autoterm Test Software) ───────────────────
+#include "diag_proxy.h"
 
 namespace esphome {
 namespace autoterm2d {
@@ -50,7 +52,8 @@ static constexpr uint32_t VPANEL_POLL_MS     = 2000;
 
 class Autoterm2DClimate : public climate::Climate,
                             public Component,
-                            public uart::UARTDevice {
+                            public uart::UARTDevice,
+                            public DiagProxyMixin {
  public:
   Autoterm2DClimate() = default;
 
@@ -138,10 +141,16 @@ class Autoterm2DClimate : public climate::Climate,
     } else {
       ESP_LOGI("autoterm2d", "Starting in VIRTUAL-PANEL mode (ESP32 drives poll cycle)");
     }
+    diag_setup_();  // TCP-Diagnoseserver starten (Port 8888)
   }
 
   void loop() override {
     const uint32_t now = millis();
+
+    // ── Diagnose-Proxy: Client verwalten + TCP→UART senden ──────────────────
+    diag_loop_tick_();
+    diag_drain_tx_([this](uint8_t b) { write_byte(b); });
+    // ────────────────────────────────────────────────────────────────────────
 
     // Parser timeout
     if (read_state_ != 0 && (now - parse_start_ms_) > PARSER_TIMEOUT_MS) {
@@ -149,8 +158,8 @@ class Autoterm2DClimate : public climate::Climate,
       reset_parser();
     }
 
-    // Virtual panel: generate poll cycle when no physical panel present
-    if (ctrl_uart_ == nullptr)
+    // Virtual panel: Poll-Zyklus pausiert wenn Diagnose-Client verbunden
+    if (ctrl_uart_ == nullptr && !is_diagnostic_active())
       virtual_panel_poll(now);
 
     // Read heater bytes, forward, log, parse
@@ -159,6 +168,7 @@ class Autoterm2DClimate : public climate::Climate,
       uint8_t b;
       read_byte(&b);
       if (ctrl_uart_) ctrl_uart_->write_byte(b);   // bridge: forward to panel
+      diag_forward_rx_(b);                          // Diagnose-Client mitlauschen
       heater_frame_buf_.push_back(b);
       process_byte(b);
       got_byte = true;
