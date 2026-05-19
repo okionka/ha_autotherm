@@ -1,0 +1,81 @@
+# YAML_ERGAENZUNGEN.yaml
+# Folgendes in autoterm2d.yaml einfügen / ergänzen.
+# Kommentare mit "← NEU" markieren die neuen Abschnitte.
+
+# ── Ergänzung 1: Diagnosestatus als Binary-Sensor in HA ──────────────────────
+binary_sensor:
+  - platform: template
+    name: "Diagnose-Client verbunden"
+    id: diag_client_active
+    icon: mdi:lan-connect
+    entity_category: diagnostic
+    device_class: connectivity
+    lambda: return id(diesel_heater)->is_diagnostic_active();  # ← NEU
+
+# ── Ergänzung 2: Diagnose-Port konfigurieren (optional, Standard 8888) ───────
+# In den esphome: > on_boot: Block einfügen:
+esphome:
+  # ... vorhandene Einstellungen ...
+  on_boot:
+    priority: -100   # nach WiFi-Verbindung
+    lambda: |-
+      id(diesel_heater)->set_diag_port(8888);   # ← NEU (Port anpassen falls nötig)
+
+# ── Ergänzung 3: Firewall-Hinweis in substitutions ────────────────────────────
+# Nur zur Dokumentation – keine YAML-Funktion:
+#
+#   TCP Port 8888 muss im Router/Firewall nicht nach außen geöffnet werden.
+#   Der Laptop muss sich im selben WiFi-Netzwerk wie der ESP32 befinden.
+#   ESP32-IP laut autoterm2d.yaml: ${device_ip} = 192.168.7.6
+
+
+# ── Vollständiges Beispiel climate:-Block mit Diagnose-Ergänzungen ────────────
+# (Zeigt nur die neuen Felder; bestehende Felder bleiben unverändert)
+
+climate:
+  - platform: autoterm2d
+    id: diesel_heater
+    name: "Diesel Heater"
+    uart_id: uart_2_heater
+    panel_uart_id: uart_1_controller       # Bridge-Modus; weglassen für Virtual-Panel
+    temperature_sensor: room_temperature
+    air_temperature_source: room_temperature
+    # ── Diagnose-Port (NEU) ───────────────────────────────────────────────
+    # diagnostic_port: 8888               # optional – Standard ist 8888
+    # ─────────────────────────────────────────────────────────────────────
+    status_text:
+      name: "Heater Status"
+    power_level:
+      name: "Heater Power Level"
+    status_code:
+      name: "Heater Status Code"
+      entity_category: diagnostic
+    error_code:
+      name: "Heater Error Code"
+      entity_category: diagnostic
+    error_text:
+      name: "Heater Error"
+      entity_category: diagnostic
+    software_version:
+      name: "Heater Firmware Version"
+      entity_category: diagnostic
+    status_report:
+      name: "Heater Status Report"
+      entity_category: diagnostic
+    heater_board_temperature:
+      name: "Heater Board Temperature"
+      entity_category: diagnostic
+    battery_voltage:
+      name: "Heater Battery Voltage"
+      entity_category: diagnostic
+    air_temperature:
+      name: "Heater Air Temperature"
+    panel_temperature:
+      name: "Panel Temperature"
+      entity_category: diagnostic
+    ventilation_power:
+      name: "Ventilator Power"
+      entity_category: diagnostic
+    remaining_work_time:
+      name: "Heater Remaining Time"
+      entity_category: diagnostic
